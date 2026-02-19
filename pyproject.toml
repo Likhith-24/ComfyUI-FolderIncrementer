@@ -1,8 +1,9 @@
 [project]
-name = "comfyui-folderincrementer"
-description = "Auto-incrementing version string node for ComfyUI (v001, v002, …) – perfect for automating folder/file versioning."
-version = "1.0.0"
+name = "comfyui-customnodepacks"
+description = "Custom node packs for ComfyUI: FolderIncrementer (auto-versioning) + MaskEditControl (pinpoint mask editing with SAM2/SAM3, per-axis erode/expand, point editor, bbox tools, video mask propagation)."
+version = "1.1.0"
 license = "MIT"
+requires-python = ">=3.10"
 
 [project.urls]
-Repository = "https://github.com/Likhith-24/ComfyUI-FolderIncrementer"
+Repository = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks"

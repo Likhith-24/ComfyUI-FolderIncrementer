@@ -1,3 +1,13 @@
+# Core dependencies (provided by ComfyUI)
 # torch
+# torchvision
 # numpy
-# opencv-python
+
+# Required
+opencv-python>=4.7.0
+scipy>=1.10.0
+
+# Optional – ViTMatte neural matting (auto-downloads model from HuggingFace)
+# Uncomment if you want the best edge refinement:
+# transformers>=4.30.0
+# pillow>=9.0.0

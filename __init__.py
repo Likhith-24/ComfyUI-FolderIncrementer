@@ -25,6 +25,8 @@ from .nodes.sam_mask_generator import SAMMaskGeneratorMEC
 from .nodes.mask_batch_manager import MaskBatchManager
 from .nodes.mask_math import MaskMath
 from .nodes.bbox_nodes import BBoxCreate, BBoxFromMask, BBoxToMask, BBoxPad, BBoxCrop
+from .nodes.vitmatte_refiner import ViTMatteRefinerMEC
+from .nodes.sam_vitmatte_pipeline import SAMViTMattePipelineMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -42,6 +44,8 @@ _MEC_MAPPINGS = {
     "BBoxToMask": BBoxToMask,
     "BBoxPad": BBoxPad,
     "BBoxCrop": BBoxCrop,
+    "ViTMatteRefinerMEC": ViTMatteRefinerMEC,
+    "SAMViTMattePipelineMEC": SAMViTMattePipelineMEC,
 }
 
 _MEC_DISPLAY = {
@@ -60,6 +64,8 @@ _MEC_DISPLAY = {
     "BBoxToMask": "BBox To Mask (MEC)",
     "BBoxPad": "BBox Pad (MEC)",
     "BBoxCrop": "BBox Crop (MEC)",
+    "ViTMatteRefinerMEC": "ViTMatte Edge Refiner (MEC)",
+    "SAMViTMattePipelineMEC": "SAM + ViTMatte Pipeline (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────

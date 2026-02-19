@@ -1,0 +1,8 @@
+[project]
+name = "comfyui-folderincrementer"
+description = "Auto-incrementing version string node for ComfyUI (v001, v002, …) – perfect for automating folder/file versioning."
+version = "1.0.0"
+license = "MIT"
+
+[project.urls]
+Repository = "https://github.com/your-username/ComfyUI-FolderIncrementer"

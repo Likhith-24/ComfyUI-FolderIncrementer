@@ -7,3 +7,8 @@ requires-python = ">=3.10"
 
 [project.urls]
 Repository = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks"
+
+[tool.comfy]
+PublisherId = "likhith-24" # TODO (fill in Publisher ID from Comfy Registry Website).
+DisplayName = "Likhith V" # Display name for the Custom Node. Can be changed later.
+Icon = "https://example.com/icon.png" # SVG, PNG, JPG or GIF (MAX. 800x400px)

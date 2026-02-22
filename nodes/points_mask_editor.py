@@ -2,12 +2,15 @@
 PointsMaskEditor – Unified interactive editor for points AND bounding boxes.
 
 Click = add point (left=positive, right=negative).
-Drag  = draw bounding box (auto-detected when mouse moves >5px).
+Ctrl+Drag = draw bounding box (left=positive, right=negative).
 No mode switching needed – both coexist in the same canvas.
 
-Outputs points_json, bbox_json, and a direct mask from the points.
-Designed to feed directly into SAM2, SAM3, and ViTMatte nodes.
-Also compatible with SeC (Comfyui-SecNodes) via standard MASK / point formats.
+Outputs are designed for full compatibility with:
+  • Sam2Segmentation (comfyui-segment-anything-2) – positive_coords, negative_coords, bboxes
+  • SAM3 – positive_coords, negative_coords, pos_bboxes, neg_bboxes
+  • SAMMaskGeneratorMEC (this pack) – points_json, bbox_json
+  • BBox pipeline nodes – primary_bbox [x, y, w, h]
+  • ViTMatte / SeC – mask, points_json
 """
 
 import torch
@@ -21,18 +24,17 @@ class PointsMaskEditor:
 
     - Left-click  → positive point (label=1)
     - Right-click → negative point (label=0)
-    - Left-drag   → bounding box (auto-detected by movement)
+    - Ctrl+Left-drag  → positive bounding box (green)
+    - Ctrl+Right-drag → negative bounding box (red)
     - Scroll      → adjust point radius
     - Ctrl+Scroll → zoom
     - Middle-drag → pan
-    - Shift+click → delete point
-    - Delete      → remove hovered point
+    - Shift+click → delete element
+    - Delete      → remove hovered element
     - Ctrl+Z/Y    → undo / redo
-    - C           → clear all
 
-    Outputs are designed to be directly compatible with SAM2, SAM3,
-    and ViTMatte pipelines.  Also compatible with SeC (Comfyui-SecNodes)
-    as they share standard point coordinate and MASK formats.
+    Outputs are designed to be directly compatible with SAM2, SAM2.1,
+    SAM3, SeC, and ViTMatte pipelines.
     """
 
     @classmethod
@@ -47,7 +49,7 @@ class PointsMaskEditor:
                     "tooltip": (
                         "JSON from the interactive editor. Contains both points and bboxes.\n"
                         "points: [{x, y, label, radius}, ...]\n"
-                        "bboxes: [[x1, y1, x2, y2], ...]\n"
+                        "bboxes: [[x1, y1, x2, y2, label], ...]  label: 1=positive, 0=negative\n"
                         "Automatically populated by the canvas widget."
                     ),
                 }),
@@ -64,13 +66,19 @@ class PointsMaskEditor:
             },
         }
 
-    RETURN_TYPES = ("MASK", "STRING", "STRING", "BBOX",)
-    RETURN_NAMES = ("mask", "points_json", "bbox_json", "primary_bbox",)
+    RETURN_TYPES = ("MASK", "STRING", "STRING", "BBOX", "BBOX", "STRING", "STRING", "BBOX",)
+    RETURN_NAMES = ("mask", "positive_coords", "negative_coords", "bboxes", "neg_bboxes",
+                    "points_json", "bbox_json", "primary_bbox",)
     FUNCTION = "generate"
     CATEGORY = "MaskEditControl/Editor"
     DESCRIPTION = (
-        "Unified points + bbox editor. Click for points, drag for boxes – "
-        "no mode switching. Outputs feed directly into SAM2/SAM3/ViTMatte."
+        "Unified points + bbox editor. Click for points, Ctrl+drag for boxes – "
+        "no mode switching. Outputs feed directly into SAM2/SAM2.1/SAM3/SeC/ViTMatte.\n\n"
+        "positive_coords / negative_coords → Sam2Segmentation coordinates_positive / coordinates_negative\n"
+        "bboxes → Sam2Segmentation / SAM2.1 / SeC bboxes input (positive only)\n"
+        "neg_bboxes → SAM3 negative bounding boxes\n"
+        "points_json / bbox_json → SAMMaskGeneratorMEC\n"
+        "primary_bbox → BBox pipeline nodes [x, y, w, h]"
     )
 
     def generate(self, width: int, height: int, editor_data: str,
@@ -89,13 +97,37 @@ class PointsMaskEditor:
             data = {}
 
         points = data.get("points", [])
-        bboxes = data.get("bboxes", [])
+        bboxes_raw = data.get("bboxes", [])
 
         # Backward compat: if editor_data is a plain list, treat as points
         if isinstance(data, list):
             points = data
-            bboxes = []
+            bboxes_raw = []
 
+        # ── Separate positive / negative points ───────────────────────
+        pos_points = []
+        neg_points = []
+        for pt in points:
+            coord = {"x": int(round(float(pt.get("x", 0)))),
+                     "y": int(round(float(pt.get("y", 0))))}
+            if int(pt.get("label", 1)) == 1:
+                pos_points.append(coord)
+            else:
+                neg_points.append(coord)
+
+        # ── Separate positive / negative bboxes ───────────────────────
+        pos_bboxes = []  # [[x1,y1,x2,y2], ...]
+        neg_bboxes = []  # [[x1,y1,x2,y2], ...]
+        for box in bboxes_raw:
+            if len(box) >= 4:
+                coords = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                label = int(box[4]) if len(box) >= 5 else 1
+                if label == 1:
+                    pos_bboxes.append(coords)
+                else:
+                    neg_bboxes.append(coords)
+
+        # ── Build mask ─────────────────────────────────────────────────
         device = "cpu"
         if existing_mask is not None:
             device = existing_mask.device
@@ -105,7 +137,7 @@ class PointsMaskEditor:
         else:
             mask = torch.zeros(1, height, width, dtype=torch.float32, device=device)
 
-        # ── Render points onto mask ────────────────────────────────────
+        # Render points onto mask
         if points:
             yy = torch.arange(height, dtype=torch.float32, device=device).unsqueeze(1).expand(height, width)
             xx = torch.arange(width, dtype=torch.float32, device=device).unsqueeze(0).expand(height, width)
@@ -130,30 +162,55 @@ class PointsMaskEditor:
                 else:
                     mask[0] = mask[0] * (1.0 - brush)
 
-        # ── Render bboxes onto mask (filled rectangles) ────────────────
-        for box in bboxes:
-            if len(box) >= 4:
-                x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-                x1, y1 = max(0, min(x1, width)), max(0, min(y1, height))
-                x2, y2 = max(0, min(x2, width)), max(0, min(y2, height))
-                if x2 > x1 and y2 > y1:
-                    mask[0, y1:y2, x1:x2] = 1.0
+        # Render bboxes onto mask (positive add, negative subtract)
+        for coords in pos_bboxes:
+            x1, y1, x2, y2 = coords
+            x1, y1 = max(0, min(x1, width)), max(0, min(y1, height))
+            x2, y2 = max(0, min(x2, width)), max(0, min(y2, height))
+            if x2 > x1 and y2 > y1:
+                mask[0, y1:y2, x1:x2] = 1.0
+
+        for coords in neg_bboxes:
+            x1, y1, x2, y2 = coords
+            x1, y1 = max(0, min(x1, width)), max(0, min(y1, height))
+            x2, y2 = max(0, min(x2, width)), max(0, min(y2, height))
+            if x2 > x1 and y2 > y1:
+                mask[0, y1:y2, x1:x2] = 0.0
 
         if normalize:
             mask = mask.clamp(0.0, 1.0)
 
         # ── Build outputs ──────────────────────────────────────────────
+
+        # 1. positive_coords / negative_coords — STRING for Sam2Segmentation
+        #    Format: [{"x": int, "y": int}, ...]
+        positive_coords = json.dumps(pos_points)
+        negative_coords = json.dumps(neg_points)
+
+        # 2. bboxes — BBOX for Sam2Segmentation / SAM2.1 / SeC
+        #    Format: [[x1, y1, x2, y2], ...] — list of positive bbox coordinate lists
+        #    Sam2Segmentation iterates: for bbox_list in bboxes → for bbox in bbox_list
+        #    where each bbox_list is one bbox's coordinates [x1,y1,x2,y2]
+        #    and bbox is each individual coordinate value.
+        bboxes_out = pos_bboxes if pos_bboxes else []
+
+        # 3. neg_bboxes — BBOX for SAM3 negative bounding boxes
+        neg_bboxes_out = neg_bboxes if neg_bboxes else []
+
+        # 4. points_json — STRING unified format for SAMMaskGeneratorMEC
+        #    Format: [{x, y, label, radius}, ...]
         points_json_out = json.dumps(points)
 
-        # First bbox as primary_bbox in [x, y, w, h] format for BBOX type
-        if bboxes and len(bboxes[0]) >= 4:
-            b = bboxes[0]
-            primary_bbox = [int(b[0]), int(b[1]),
-                            int(b[2]) - int(b[0]), int(b[3]) - int(b[1])]
+        # 5. bbox_json — STRING first positive bbox as [x1,y1,x2,y2] for SAMMaskGeneratorMEC
+        bbox_json_out = json.dumps(pos_bboxes[0] if pos_bboxes else [])
+
+        # 6. primary_bbox — BBOX [x, y, w, h] for BBox pipeline / legacy nodes
+        if pos_bboxes:
+            b = pos_bboxes[0]
+            primary_bbox = [b[0], b[1], b[2] - b[0], b[3] - b[1]]
         else:
             primary_bbox = [0, 0, width, height]
 
-        # bbox_json: first bbox as [x1, y1, x2, y2] for SAM/SeC
-        bbox_json_out = json.dumps(bboxes[0] if bboxes else [])
-
-        return (mask, points_json_out, bbox_json_out, primary_bbox)
+        return (mask, positive_coords, negative_coords,
+                bboxes_out, neg_bboxes_out,
+                points_json_out, bbox_json_out, primary_bbox)

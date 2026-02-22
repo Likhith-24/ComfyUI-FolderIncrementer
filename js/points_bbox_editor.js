@@ -16,7 +16,6 @@ import { app } from "../../scripts/app.js";
  *   CTRL + Scroll          → zoom canvas
  *   CTRL + Z               → undo
  *   CTRL + Shift + Z / Y   → redo
- *   CTRL + C               → clear all
  *   R                      → reset view (zoom & pan)
  */
 
@@ -145,7 +144,7 @@ class PointsBBoxEditor {
     updateWidgets() {
         const data = JSON.stringify({
             points: this.points,
-            bboxes: this.bboxes.map(b => b.slice(0, 4)),
+            bboxes: this.bboxes,
         });
         const w = this.node.widgets?.find(w => w.name === "editor_data");
         if (w) { w.value = data; w.callback?.(data); }
@@ -230,18 +229,23 @@ class PointsBBoxEditor {
             const hov = (i === this.hoveredBbox);
             const bw = b[2] - b[0], bh = b[3] - b[1];
 
-            ctx.fillStyle = color + (hov ? "30" : "15");
+            // Fill
+            ctx.fillStyle = color + (hov ? "30" : "18");
             ctx.fillRect(b[0], b[1], bw, bh);
-            ctx.strokeStyle = color + (hov ? "dd" : "88");
-            ctx.lineWidth = (hov ? 2.5 : 1.5) / this.zoom;
-            ctx.setLineDash(isPos ? [] : [6 / this.zoom, 4 / this.zoom]);
+
+            // Main border — solid for positive, dashed for negative
+            ctx.strokeStyle = color + (hov ? "ee" : "99");
+            ctx.lineWidth = (hov ? 2.5 : 2) / this.zoom;
+            if (!isPos) ctx.setLineDash([6 / this.zoom, 4 / this.zoom]);
             ctx.strokeRect(b[0], b[1], bw, bh);
             ctx.setLineDash([]);
 
-            // Corner markers
-            const cm = Math.min(12, Math.min(bw, bh) / 3) / this.zoom;
-            ctx.strokeStyle = color + "cc";
-            ctx.lineWidth = 2 / this.zoom;
+            // Corner brackets — L-shaped with filled corner dots
+            const cm = Math.min(14, Math.min(bw, bh) / 3) / this.zoom;
+            const cornerLw = 2.5 / this.zoom;
+            const dotR = 3 / this.zoom;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = cornerLw;
             for (const [cx, cy, dx, dy] of [
                 [b[0], b[1], 1, 1], [b[2], b[1], -1, 1],
                 [b[0], b[3], 1, -1], [b[2], b[3], -1, -1]
@@ -249,18 +253,23 @@ class PointsBBoxEditor {
                 ctx.beginPath();
                 ctx.moveTo(cx + dx * cm, cy); ctx.lineTo(cx, cy); ctx.lineTo(cx, cy + dy * cm);
                 ctx.stroke();
+                // Filled corner dot
+                ctx.beginPath();
+                ctx.arc(cx, cy, dotR, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
             }
 
             // Label badge
-            const label = isPos ? `+B${i}` : `-B${i}`;
+            const label = isPos ? `+B${i}` : `\u2212B${i}`;
             const fs = Math.max(9, 11 / this.zoom);
             ctx.font = `bold ${fs}px Inter, system-ui, sans-serif`;
             const tw = ctx.measureText(label).width;
             const badgeH = fs + 4 / this.zoom;
-            ctx.fillStyle = color + "cc";
+            ctx.fillStyle = color + "dd";
             _roundRect(ctx, b[0], b[1] - badgeH - 2 / this.zoom, tw + 8 / this.zoom, badgeH, 3 / this.zoom);
             ctx.fill();
-            ctx.fillStyle = "#000000cc";
+            ctx.fillStyle = "#000000dd";
             ctx.fillText(label, b[0] + 4 / this.zoom, b[1] - 4 / this.zoom);
         }
 
@@ -391,7 +400,7 @@ class PointsBBoxEditor {
             `zoom: ${(this.zoom * 100).toFixed(0)}%`,
         ];
         ctx.fillText(statusParts.join("  \u2502  "), x + 8, y + h - 6);
-        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=radius";
+        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=radius  Del=hovered";
         const helpW = ctx.measureText(helpText).width;
         ctx.fillStyle = "#585b70";
         ctx.fillText(helpText, x + w - helpW - 8, y + h - 6);
@@ -778,11 +787,6 @@ app.registerExtension({
                 render();
             } else if (e.key === "y" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault(); editor.redo(); render();
-            } else if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
-                e.preventDefault();
-                editor.saveState(); editor.points = []; editor.bboxes = [];
-                editor.hoveredPoint = -1; editor.hoveredBbox = -1;
-                editor.updateWidgets(); render();
             } else if (e.key === "Delete" || e.key === "Backspace") {
                 e.preventDefault();
                 if (editor.hoveredPoint >= 0) {

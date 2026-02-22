@@ -6,11 +6,30 @@ A growing collection of custom nodes for ComfyUI.
 
 ## 1. FolderIncrementer
 
-Auto-incrementing version string node (`v001`, `v002`, …) for automating folder/file versioning.
+Filesystem-aware auto-incrementing version node (`v001`, `v002`, …) for automating folder/file versioning.
 
-- **Folder Version Incrementer** – outputs next version string + number
-- **Folder Version Reset** – reset a counter to 0
-- **Folder Version Set** – manually set a counter value
+- **Folder Version Incrementer** – scans output directory for existing version folders and outputs the **next** available version
+- **Folder Version Check** – report how many versions exist for a folder
+- **Folder Version Set** – reserve version slots by creating placeholder directories
+
+### Key Features
+
+- **Filesystem-based** – no global counter file. Scans `<output_dir>/<folder_name>/` for existing `v001`, `v002`, … directories
+- **Cancel-safe** – if you cancel execution mid-way, no version number is wasted (no folder was created → same version next run)
+- **Extension-preserving** – `example.png` → `example/v001/example.png`, `clip.mp4` → `clip/v001/clip.mp4`
+- **Format-agnostic** – works with any file extension (.png, .jpg, .mp4, .webp, …)
+- **Auto-derives folder name** from `source_filename` input (from Load Image / Load Video)
+
+### Outputs (6)
+
+| Output | Example | Purpose |
+|--------|---------|--------|
+| `version_string` | `v001` | Version tag |
+| `version_number` | `1` | Integer version |
+| `folder_name` | `example` | Derived from source filename |
+| `subfolder_path` | `example/v001` | For Save Image subfolder |
+| `filename_prefix` | `example/v001/example` | Without extension |
+| `output_filename` | `example/v001/example.png` | With original extension |
 
 ---
 
@@ -141,10 +160,32 @@ The interactive canvas editor supports **both points and bounding boxes without 
 | **Delete / Backspace** | Delete hovered element |
 | **CTRL + Z** | Undo |
 | **CTRL + Shift + Z** | Redo |
-| **CTRL + C** | Clear all |
 | **R** | Reset view |
 
-The editor outputs a unified `editor_data` JSON containing both `points` and `bboxes`, directly compatible with SAM / SAM2 / SAM3.
+**Toolbar buttons:** The editor features a built-in toolbar with:
+- **Pill counters** showing +pts, −pts, bbox count, and current radius
+- **✕ Pts** – clear all points only
+- **✕ BBox** – clear all bounding boxes only
+- **✕ All** – clear everything
+- **↶ Undo / Redo ↷** – step through history
+- **▣ Fit** – fit view to canvas
+
+**Status bar** at the bottom shows canvas dimensions, cursor coordinates, and zoom percentage.
+
+The editor outputs a unified `editor_data` JSON containing both `points` and `bboxes` (with positive/negative labels), directly compatible with SAM / SAM2 / SAM3.
+
+**Outputs (8):**
+
+| Output | Type | Format | Target |
+|--------|------|--------|--------|
+| `mask` | MASK | Rendered points/bboxes mask | General use |
+| `positive_coords` | STRING | `[{"x":int,"y":int}, ...]` | Sam2Segmentation `coordinates_positive` |
+| `negative_coords` | STRING | `[{"x":int,"y":int}, ...]` | Sam2Segmentation `coordinates_negative` |
+| `bboxes` | BBOX | `[[x1,y1,x2,y2], ...]` | Sam2Segmentation / SAM2.1 / SeC |
+| `neg_bboxes` | BBOX | `[[x1,y1,x2,y2], ...]` | SAM3 negative bboxes |
+| `points_json` | STRING | `[{x,y,label,radius}, ...]` | SAMMaskGeneratorMEC |
+| `bbox_json` | STRING | `[x1,y1,x2,y2]` | SAMMaskGeneratorMEC |
+| `primary_bbox` | BBOX | `[x,y,w,h]` | BBox pipeline / legacy nodes |
 
 **Image input**: Connect a `reference_image` to see it as the editor background for precise point placement.
 

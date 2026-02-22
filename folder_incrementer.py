@@ -23,6 +23,11 @@ class FolderIncrementer:
     The counter is tracked per-label and persists across ComfyUI restarts.
     Connect any output to the 'trigger' input – its value is ignored;
     the connection simply ensures this node runs as part of the graph.
+
+    If source_filename is provided (e.g. from a Load Image / Load Video node),
+    the folder name is auto-derived from the input filename, version
+    subdirectories are created (v001, v002, …), and the output filename
+    matches the input filename.
     """
 
     @classmethod
@@ -31,15 +36,16 @@ class FolderIncrementer:
             "required": {
                 "prefix": ("STRING", {"default": "v", "tooltip": "Prefix before the number (e.g. 'v' → v001)"}),
                 "padding": ("INT", {"default": 3, "min": 1, "max": 10, "tooltip": "Zero-pad width (3 → 001)"}),
-                "label": ("STRING", {"default": "default", "tooltip": "Unique label so different workflows / usages keep independent counters"}),
+                "label": ("STRING", {"default": "default", "tooltip": "Counter label (ignored when source_filename is provided)"}),
             },
             "optional": {
                 "trigger": ("*", {"tooltip": "Connect any output here to ensure this node is part of the execution graph"}),
+                "source_filename": ("STRING", {"default": "", "tooltip": "File path/name from Load Image or Load Video. Auto-derives folder name and output filename."}),
             },
         }
 
-    RETURN_TYPES = ("STRING", "INT")
-    RETURN_NAMES = ("version_string", "version_number")
+    RETURN_TYPES = ("STRING", "INT", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("version_string", "version_number", "folder_name", "subfolder_path", "filename_prefix")
     FUNCTION = "increment"
     CATEGORY = "utils"
     OUTPUT_NODE = False
@@ -49,16 +55,39 @@ class FolderIncrementer:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def increment(self, prefix="v", padding=3, label="default", trigger=None):
+    def increment(self, prefix="v", padding=3, label="default", trigger=None, source_filename=""):
+        # Auto-derive folder name from source filename if provided
+        if source_filename and source_filename.strip():
+            basename = os.path.basename(source_filename.strip())
+            name_no_ext = os.path.splitext(basename)[0]
+            folder_name = name_no_ext
+            counter_label = name_no_ext   # Use filename as unique counter key
+            output_filename = name_no_ext  # Output filename matches input name
+        else:
+            folder_name = label
+            counter_label = label
+            output_filename = ""
+
         counters = _load_counters()
 
         # Increment (or initialise) the counter for this label
-        current = counters.get(label, 0) + 1
-        counters[label] = current
+        current = counters.get(counter_label, 0) + 1
+        counters[counter_label] = current
         _save_counters(counters)
 
         version_string = f"{prefix}{str(current).zfill(padding)}"
-        return (version_string, current)
+
+        # Build paths
+        # subfolder_path: "folder_name/v001" – can be used as output subdirectory
+        subfolder_path = f"{folder_name}/{version_string}" if folder_name else version_string
+
+        # filename_prefix: "folder_name/v001/filename" – ready for ComfyUI save nodes
+        if output_filename:
+            filename_prefix = f"{subfolder_path}/{output_filename}"
+        else:
+            filename_prefix = f"{subfolder_path}/{version_string}"
+
+        return (version_string, current, folder_name, subfolder_path, filename_prefix)
 
 
 class FolderIncrementerReset:

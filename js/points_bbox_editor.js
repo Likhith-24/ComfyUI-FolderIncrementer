@@ -54,6 +54,8 @@ class PointsBBoxEditor {
         // Reference image
         this._refImage  = null;
         this._refLoaded = false;
+        this._lastRefUrl = null;
+        this._containerEl = null;
         this._canvasW   = 512;
         this._canvasH   = 512;
 
@@ -131,12 +133,14 @@ class PointsBBoxEditor {
         const w = this.node.widgets?.find(w => w.name === "editor_data");
         if (w) {
             w.value = data;
+            w.callback?.(data);
         }
     }
 
     // ── Load reference image ─────────────────────────────────────────
     loadRefImage(imageUrl) {
-        if (!imageUrl) return;
+        if (!imageUrl || imageUrl === this._lastRefUrl) return;
+        this._lastRefUrl = imageUrl;
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
@@ -144,8 +148,37 @@ class PointsBBoxEditor {
             this._refLoaded = true;
             this._canvasW   = img.naturalWidth;
             this._canvasH   = img.naturalHeight;
+
+            // Update node width/height widgets to match image
+            const wWidget = this.node.widgets?.find(w => w.name === "width");
+            const hWidget = this.node.widgets?.find(w => w.name === "height");
+            if (wWidget) wWidget.value = img.naturalWidth;
+            if (hWidget) hWidget.value = img.naturalHeight;
+
+            // Auto-fit view to show entire image
+            if (this._containerEl) {
+                const rect = this._containerEl.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    this.fitView(rect.width, rect.height);
+                }
+            }
+
+            this.node._mecRender?.();
+        };
+        img.onerror = () => {
+            console.warn("[MEC] Failed to load reference image:", imageUrl);
         };
         img.src = imageUrl;
+    }
+
+    // ── Fit view to canvas content ───────────────────────────────────
+    fitView(containerW, containerH) {
+        if (this._canvasW <= 0 || this._canvasH <= 0) return;
+        const scaleX = containerW / this._canvasW;
+        const scaleY = containerH / this._canvasH;
+        this.zoom = Math.min(scaleX, scaleY) * 0.92;
+        this.panX = (containerW - this._canvasW * this.zoom) / 2;
+        this.panY = (containerH - this._canvasH * this.zoom) / 2;
     }
 
     // ── Drawing ──────────────────────────────────────────────────────
@@ -339,6 +372,30 @@ app.registerExtension({
         const editor = new PointsBBoxEditor(node);
         editor.saveState();
 
+        // ── Sync canvas dimensions from widget values ────────────────
+        function syncCanvasSize() {
+            const wWidget = node.widgets?.find(w => w.name === "width");
+            const hWidget = node.widgets?.find(w => w.name === "height");
+            if (wWidget && hWidget) {
+                editor._canvasW = wWidget.value;
+                editor._canvasH = hWidget.value;
+            }
+        }
+        syncCanvasSize();
+
+        // Watch for width/height widget changes
+        for (const wName of ["width", "height"]) {
+            const wid = node.widgets?.find(w => w.name === wName);
+            if (wid) {
+                const origCb = wid.callback;
+                wid.callback = function(v) {
+                    origCb?.call(this, v);
+                    syncCanvasSize();
+                    if (typeof render === "function") render();
+                };
+            }
+        }
+
         // ── Create DOM widget ────────────────────────────────────────
         const container = document.createElement("div");
         container.style.width = "100%";
@@ -349,6 +406,7 @@ app.registerExtension({
         container.style.borderRadius = "4px";
         container.style.border = "1px solid #444";
         container.style.boxSizing = "border-box";
+        editor._containerEl = container;
 
         const canvas = document.createElement("canvas");
         canvas.style.width  = "100%";
@@ -389,19 +447,76 @@ app.registerExtension({
             for (const inp of node.inputs) {
                 if (inp.name === "reference_image" && inp.link != null) {
                     const linkInfo = app.graph.links[inp.link];
-                    if (linkInfo) {
-                        const srcNode = app.graph.getNodeById(linkInfo.origin_id);
-                        if (srcNode && srcNode.imgs && srcNode.imgs.length > 0) {
-                            editor.loadRefImage(srcNode.imgs[0].src);
+                    if (!linkInfo) continue;
+                    const srcNode = app.graph.getNodeById(linkInfo.origin_id);
+                    if (!srcNode) continue;
+
+                    // Strategy 1: Post-execution preview images on source node
+                    if (srcNode.imgs && srcNode.imgs.length > 0) {
+                        editor.loadRefImage(srcNode.imgs[0].src);
+                        return;
+                    }
+
+                    // Strategy 2: LoadImage node with "image" widget → /view API
+                    const imageWidget = srcNode.widgets?.find(w => w.name === "image");
+                    if (imageWidget && imageWidget.value) {
+                        const val = imageWidget.value;
+                        const parts = val.split("/");
+                        const subfolder = parts.length > 1 ? parts.slice(0, -1).join("/") : "";
+                        const filename = parts[parts.length - 1];
+                        const url = `/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=input`;
+                        editor.loadRefImage(url);
+                        return;
+                    }
+
+                    // Strategy 3: Walk one level upstream to find source image
+                    if (srcNode.inputs) {
+                        for (const upInp of srcNode.inputs) {
+                            if (upInp.link != null) {
+                                const upLink = app.graph.links[upInp.link];
+                                if (!upLink) continue;
+                                const upNode = app.graph.getNodeById(upLink.origin_id);
+                                if (!upNode) continue;
+                                if (upNode.imgs?.length > 0) {
+                                    editor.loadRefImage(upNode.imgs[0].src);
+                                    return;
+                                }
+                                const upImgW = upNode.widgets?.find(w => w.name === "image");
+                                if (upImgW?.value) {
+                                    const uVal = upImgW.value;
+                                    const uParts = uVal.split("/");
+                                    const uSub = uParts.length > 1 ? uParts.slice(0, -1).join("/") : "";
+                                    const uFile = uParts[uParts.length - 1];
+                                    const url = `/view?filename=${encodeURIComponent(uFile)}&subfolder=${encodeURIComponent(uSub)}&type=input`;
+                                    editor.loadRefImage(url);
+                                    return;
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Periodically check for image updates
+        // Detect connection changes to reload reference image
+        const origConnChange = node.onConnectionsChange;
+        node.onConnectionsChange = function(type, index, connected, link_info) {
+            origConnChange?.apply(this, arguments);
+            if (connected) {
+                setTimeout(() => { tryLoadRefImage(); render(); }, 200);
+            } else {
+                editor._refLoaded = false;
+                editor._refImage = null;
+                editor._lastRefUrl = null;
+                syncCanvasSize();
+                render();
+            }
+        };
+
+        // Periodically check for image (until loaded)
         const _imgInterval = setInterval(() => {
             if (!editor._refLoaded) tryLoadRefImage();
+            else clearInterval(_imgInterval);
         }, 2000);
 
         // Also try on execution
@@ -412,10 +527,12 @@ app.registerExtension({
             render();
         };
 
-        // ── MOUSE DOWN ───────────────────────────────────────────────
-        canvas.addEventListener("mousedown", (e) => {
+        // ── POINTER DOWN ─────────────────────────────────────────────
+        canvas.addEventListener("pointerdown", (e) => {
             e.preventDefault();
             e.stopPropagation();
+            canvas.focus();
+            canvas.setPointerCapture(e.pointerId);
             const rect = canvas.getBoundingClientRect();
             const sx = e.clientX - rect.left;
             const sy = e.clientY - rect.top;
@@ -429,8 +546,8 @@ app.registerExtension({
                 return;
             }
 
-            // CTRL held = BBox drag mode
-            if (e.ctrlKey && (e.button === 0 || e.button === 2)) {
+            // CTRL held (without Shift) = BBox drag mode
+            if (e.ctrlKey && !e.shiftKey && (e.button === 0 || e.button === 2)) {
                 editor.isBboxDrag = true;
                 editor.bboxDragLabel = (e.button === 0) ? 1 : 0;  // left=positive, right=negative
                 editor.dragStart = { x: c.x, y: c.y };
@@ -447,6 +564,7 @@ app.registerExtension({
                     if (idx >= 0) {
                         editor.saveState();
                         editor.points.splice(idx, 1);
+                        editor.hoveredPoint = -1;
                         editor.updateWidgets();
                         render();
                         return;
@@ -455,6 +573,7 @@ app.registerExtension({
                     if (bidx >= 0) {
                         editor.saveState();
                         editor.bboxes.splice(bidx, 1);
+                        editor.hoveredBbox = -1;
                         editor.updateWidgets();
                         render();
                         return;
@@ -475,8 +594,8 @@ app.registerExtension({
             }
         });
 
-        // ── MOUSE MOVE ───────────────────────────────────────────────
-        canvas.addEventListener("mousemove", (e) => {
+        // ── POINTER MOVE ─────────────────────────────────────────────
+        canvas.addEventListener("pointermove", (e) => {
             const rect = canvas.getBoundingClientRect();
             const sx = e.clientX - rect.left;
             const sy = e.clientY - rect.top;
@@ -505,8 +624,9 @@ app.registerExtension({
             }
         });
 
-        // ── MOUSE UP ─────────────────────────────────────────────────
-        canvas.addEventListener("mouseup", (e) => {
+        // ── POINTER UP ───────────────────────────────────────────────
+        canvas.addEventListener("pointerup", (e) => {
+            try { canvas.releasePointerCapture(e.pointerId); } catch(_) {}
             if (editor.isPanning) {
                 editor.isPanning = false;
                 canvas.style.cursor = "crosshair";
@@ -563,10 +683,15 @@ app.registerExtension({
 
         // ── Keyboard shortcuts ───────────────────────────────────────
         canvas.tabIndex = 0;
+        canvas.style.outline = "none";
         canvas.addEventListener("keydown", (e) => {
             if (e.key === "z" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 if (e.shiftKey) { editor.redo(); } else { editor.undo(); }
+                render();
+            } else if (e.key === "y" && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                editor.redo();
                 render();
             } else if (e.key === "c" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();

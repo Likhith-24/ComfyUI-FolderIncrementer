@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime
 
 
 def _get_output_dir():
@@ -32,26 +33,28 @@ def _scan_next_version(scan_dir, prefix, padding):
 
 class FolderIncrementer:
     """
-    Filesystem-aware auto-incrementing version node.
+    Automatic dynamic file output management node.
 
     How it works
     ────────────
-    1. Derives a *folder_name* from **source_filename** (e.g. ``example.png``
-       → ``example``) or falls back to the **label** widget.
-    2. Scans ``<output_dir>/<folder_name>/`` for existing version sub-
-       directories (``v001``, ``v002``, …) and picks the **next** available
-       number.
-    3. Outputs paths ready for Save Image / Save Video nodes.
+    1. Reads the input filename from whatever is connected (image, video,
+       or any file type) via the JS companion that auto-fills
+       ``source_filename``.
+    2. Creates folder structure:
+       ``output/{base_name}/{MM-DD-YYYY}/v###/{original_filename}``
+    3. Version scanning happens inside the **date folder**, so each day
+       starts fresh at v001.
+    4. The version folder is created on execution to "claim" the number.
+       Cancelled / stopped runs that never reach this node do NOT waste
+       a version number.
 
-    Because the version number is determined by what already exists on
-    disk, a cancelled execution will **not** waste a version number –
-    no folder was created, so the next run picks the same version again.
-
-    Examples (source_filename = ``example.png``)
-    ─────────────────────────────────────────────
-    • First run (no v* dirs)  → ``example/v001/example.png``
-    • After save creates v001 → ``example/v002/example.png``
-    • Works for any extension: ``.mp4``, ``.jpg``, …
+    Example (source_filename = ``SC_30_SHT50.mp4``, today = 02-22-2026)
+    ────────────────────────────────────────────────────────────────────
+    output/
+      SC_30_SHT50/
+        02-22-2026/
+          v001/
+            SC_30_SHT50.mp4
     """
 
     @classmethod
@@ -59,19 +62,20 @@ class FolderIncrementer:
         return {
             "required": {
                 "prefix": ("STRING", {"default": "v",
-                    "tooltip": "Prefix before the number (e.g. 'v' → v001)"}),
+                    "tooltip": "Prefix before the version number (e.g. 'v' → v001)"}),
                 "padding": ("INT", {"default": 3, "min": 1, "max": 10,
                     "tooltip": "Zero-pad width (3 → 001)"}),
                 "label": ("STRING", {"default": "default",
-                    "tooltip": "Folder / counter label (ignored when source_filename is provided)"}),
+                    "tooltip": "Fallback folder name (used only when no source file is connected)"}),
             },
             "optional": {
                 "trigger": ("*", {
-                    "tooltip": "Connect any output here to keep the node in the execution graph"}),
+                    "tooltip": "Connect any output here – the node reads the connected filename automatically"}),
                 "source_filename": ("STRING", {"default": "",
-                    "tooltip": "Filename from Load Image / Load Video. Auto-derives folder name, preserves extension."}),
+                    "tooltip": "Auto-filled by JS from the connected node. "
+                               "Drives folder name + output filename."}),
                 "base_path": ("STRING", {"default": "",
-                    "tooltip": "Override base directory for scanning.  Leave empty → ComfyUI output dir."}),
+                    "tooltip": "Override base output directory.  Leave empty → ComfyUI output dir."}),
             },
         }
 
@@ -80,7 +84,7 @@ class FolderIncrementer:
                      "subfolder_path", "filename_prefix", "output_filename")
     FUNCTION = "increment"
     CATEGORY = "utils"
-    OUTPUT_NODE = False
+    OUTPUT_NODE = True   # ensure the node always executes
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -90,35 +94,45 @@ class FolderIncrementer:
     def increment(self, prefix="v", padding=3, label="default",
                   trigger=None, source_filename="", base_path=""):
 
-        # ── Derive names from source file ─────────────────────────────
+        # ── 1. Derive names from source file ──────────────────────────
         if source_filename and source_filename.strip():
             basename = os.path.basename(source_filename.strip())
-            name_no_ext, ext = os.path.splitext(basename)   # "example", ".png"
+            name_no_ext, ext = os.path.splitext(basename)  # "SC_30_SHT50", ".mp4"
             folder_name = name_no_ext
         else:
             name_no_ext = ""
             ext = ""
             folder_name = label
 
-        # ── Resolve base directory ────────────────────────────────────
-        base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
+        # ── 2. Resolve base directory ─────────────────────────────────
+        base_dir = (base_path.strip()
+                    if base_path and base_path.strip()
+                    else _get_output_dir())
 
-        # ── Scan for next version ─────────────────────────────────────
-        scan_dir = os.path.join(base_dir, folder_name)
-        version_num = _scan_next_version(scan_dir, prefix, padding)
+        # ── 3. Build date folder (MM-DD-YYYY) ─────────────────────────
+        today_date = datetime.now().strftime("%m-%d-%Y")
+
+        # ── 4. Scan for next version INSIDE the date folder ───────────
+        #    Structure: base_dir / folder_name / today_date / v###
+        date_dir = os.path.join(base_dir, folder_name, today_date)
+        version_num = _scan_next_version(date_dir, prefix, padding)
         version_string = f"{prefix}{str(version_num).zfill(padding)}"
 
-        # ── Build output paths ────────────────────────────────────────
-        # subfolder_path  : "example/v001"
-        subfolder_path = f"{folder_name}/{version_string}"
+        # ── 5. Create the version folder to claim the number ──────────
+        version_dir = os.path.join(date_dir, version_string)
+        os.makedirs(version_dir, exist_ok=True)
 
-        # filename_prefix : "example/v001/example"  (no extension – for Save Image)
+        # ── 6. Build output paths ─────────────────────────────────────
+        # subfolder_path : "SC_30_SHT50/02-22-2026/v001"
+        subfolder_path = f"{folder_name}/{today_date}/{version_string}"
+
+        # filename_prefix: "SC_30_SHT50/02-22-2026/v001/SC_30_SHT50"
         if name_no_ext:
             filename_prefix = f"{subfolder_path}/{name_no_ext}"
         else:
             filename_prefix = f"{subfolder_path}/{version_string}"
 
-        # output_filename : "example/v001/example.png"  (with extension)
+        # output_filename: "SC_30_SHT50/02-22-2026/v001/SC_30_SHT50.mp4"
         if name_no_ext and ext:
             output_filename = f"{subfolder_path}/{name_no_ext}{ext}"
         else:
@@ -130,11 +144,11 @@ class FolderIncrementer:
 
 class FolderIncrementerReset:
     """
-    Report the current version state for a folder.
+    Report the current version state for a folder (today's date).
 
-    With filesystem-based versioning there is no counter file to reset.
-    This node scans the folder and shows how many versions exist.
-    To truly "reset", delete the version directories from disk.
+    Scans ``<output>/<label>/<MM-DD-YYYY>/`` for version folders and
+    reports how many exist.  To truly "reset", delete the version
+    directories from disk.
     """
 
     @classmethod
@@ -163,20 +177,22 @@ class FolderIncrementerReset:
 
     def check(self, label="default", trigger=None, base_path=""):
         base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
-        scan_dir = os.path.join(base_dir, label)
+        today_date = datetime.now().strftime("%m-%d-%Y")
+        scan_dir = os.path.join(base_dir, label, today_date)
         next_ver = _scan_next_version(scan_dir, "v", 3)
         current  = next_ver - 1
         if current < 1:
-            return (f"'{label}': no versions yet – next will be v001", 0)
-        return (f"'{label}': {current} version(s) exist – next will be v{str(next_ver).zfill(3)}", current)
+            return (f"'{label}/{today_date}': no versions yet – next will be v001", 0)
+        return (f"'{label}/{today_date}': {current} version(s) exist – next will be v{str(next_ver).zfill(3)}", current)
 
 
 class FolderIncrementerSet:
     """
-    Reserve version slots by creating empty directories.
+    Reserve version slots by creating empty directories (inside today's
+    date folder).
 
-    Creates empty directories v001 … v{value} so that the next
-    FolderIncrementer run will output v{value+1}.
+    Creates ``<output>/<label>/<MM-DD-YYYY>/v001`` … ``v{value}`` so that
+    the next FolderIncrementer run will output v{value+1}.
     """
 
     @classmethod
@@ -209,12 +225,14 @@ class FolderIncrementerSet:
     def set_version(self, label="default", value=1, trigger=None,
                     prefix="v", padding=3, base_path=""):
         base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
-        folder = os.path.join(base_dir, label)
+        today_date = datetime.now().strftime("%m-%d-%Y")
+        folder = os.path.join(base_dir, label, today_date)
         for i in range(1, value + 1):
             ver_dir = os.path.join(folder, f"{prefix}{str(i).zfill(padding)}")
             os.makedirs(ver_dir, exist_ok=True)
         next_ver = value + 1
-        return (f"Reserved v001–v{str(value).zfill(padding)} for '{label}'. Next = v{str(next_ver).zfill(padding)}",
+        return (f"Reserved v001–v{str(value).zfill(padding)} for '{label}/{today_date}'. "
+                f"Next = v{str(next_ver).zfill(padding)}",
                 next_ver)
 
 

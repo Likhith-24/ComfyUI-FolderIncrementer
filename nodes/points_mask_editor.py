@@ -184,18 +184,20 @@ class PointsMaskEditor:
 
         # 1. positive_coords / negative_coords — STRING for Sam2Segmentation
         #    Format: [{"x": int, "y": int}, ...]
-        positive_coords = json.dumps(pos_points)
-        negative_coords = json.dumps(neg_points)
+        #    IMPORTANT: output None (not '[]') when empty, so downstream
+        #    `if coordinates is not None:` checks work correctly.
+        positive_coords = json.dumps(pos_points) if pos_points else None
+        negative_coords = json.dumps(neg_points) if neg_points else None
 
         # 2. bboxes — BBOX for Sam2Segmentation / SAM2.1 / SeC
-        #    Format: [[x1, y1, x2, y2], ...] — list of positive bbox coordinate lists
-        #    Sam2Segmentation iterates: for bbox_list in bboxes → for bbox in bbox_list
-        #    where each bbox_list is one bbox's coordinates [x1,y1,x2,y2]
-        #    and bbox is each individual coordinate value.
-        bboxes_out = pos_bboxes if pos_bboxes else []
+        #    Sam2Segmentation expects: for bbox_list in bboxes → for bbox in bbox_list
+        #    So we pass the list of bbox coordinate-lists directly.
+        #    IMPORTANT: pass None (not []) when empty, so the
+        #    `if bboxes is not None:` check in Sam2Segmentation is skipped.
+        bboxes_out = pos_bboxes if pos_bboxes else None
 
         # 3. neg_bboxes — BBOX for SAM3 negative bounding boxes
-        neg_bboxes_out = neg_bboxes if neg_bboxes else []
+        neg_bboxes_out = neg_bboxes if neg_bboxes else None
 
         # 4. points_json — STRING unified format for SAMMaskGeneratorMEC
         #    Format: [{x, y, label, radius}, ...]

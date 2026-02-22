@@ -10,5 +10,5 @@ Repository = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks"
 
 [tool.comfy]
 PublisherId = "likhith-24" # TODO (fill in Publisher ID from Comfy Registry Website).
-DisplayName = "Likhith V" # Display name for the Custom Node. Can be changed later.
-Icon = "https://example.com/icon.png" # SVG, PNG, JPG or GIF (MAX. 800x400px)
+DisplayName = "ComfyUI-CustomNodePacks" # Display name for the Custom Node. Can be changed later.
+Icon = "https://i.pinimg.com/736x/5d/52/19/5d5219ef27c1530bea027ff95d352e05.jpg" # SVG, PNG, JPG or GIF (MAX. 800x400px)

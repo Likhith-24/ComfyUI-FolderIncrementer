@@ -7,6 +7,8 @@ import { app } from "../../scripts/app.js";
  *   Load Video, VHS, etc.) and writes it into the source_filename widget
  * - Traverses through Set/Get bus nodes, Reroute nodes, and arbitrary
  *   graph topologies to find the original source
+ * - Syncs the filename right before prompt is queued to ensure it's
+ *   always up-to-date
  */
 app.registerExtension({
     name: "Comfy.FolderIncrementer",
@@ -26,7 +28,7 @@ app.registerExtension({
     nodeCreated(node) {
         if (node.comfyClass !== "FolderIncrementer") return;
 
-        const FILENAME_WIDGETS = ["image", "video", "filename", "file"];
+        const FILENAME_WIDGETS = ["image", "video", "filename", "file", "audio"];
 
         // ── Check a single node for a filename widget ────────────────
         function getFilenameFromNode(n) {
@@ -34,7 +36,6 @@ app.registerExtension({
             for (const wName of FILENAME_WIDGETS) {
                 const w = n.widgets.find(w => w.name === wName);
                 if (w?.value && typeof w.value === "string" && w.value.trim()) {
-                    // Sanity: must look like a filename (has a dot/extension)
                     const v = w.value.trim();
                     if (v.includes(".")) return v;
                 }
@@ -43,24 +44,18 @@ app.registerExtension({
         }
 
         // ── Resolve a Get node → find matching Set node ──────────────
-        // Set/Get bus nodes (rgthree, KJNodes, etc.) use a "Constant"
-        // widget to pair up. The Get node has no input links; instead
-        // we find the Set node with the same Constant value.
         function resolveGetNode(getNode) {
-            // Look for a Constant / value widget that names the bus
             const constW = getNode.widgets?.find(
                 w => w.name === "Constant" || w.name === "constant" || w.name === "value"
             );
             if (!constW?.value) return [];
-            const busName = String(constW.value).trim();
+            const busName = String(constW.value).trim().toLowerCase();
             if (!busName) return [];
 
-            // Search all graph nodes for a matching Set node
             const results = [];
             const allNodes = app.graph._nodes || app.graph.nodes || [];
             for (const n of allNodes) {
                 if (n.id === getNode.id) continue;
-                // Match by title pattern (Set_xxx) or comfyClass
                 const title = (n.title || "").toLowerCase();
                 const cls = (n.comfyClass || "").toLowerCase();
                 const isSet = title.startsWith("set") || cls.startsWith("set")
@@ -69,7 +64,7 @@ app.registerExtension({
                 const setConst = n.widgets?.find(
                     w => w.name === "Constant" || w.name === "constant" || w.name === "value"
                 );
-                if (setConst && String(setConst.value).trim() === busName) {
+                if (setConst && String(setConst.value).trim().toLowerCase() === busName) {
                     results.push(n);
                 }
             }
@@ -77,8 +72,7 @@ app.registerExtension({
         }
 
         // ── Deep graph traversal to find a filename ──────────────────
-        // Follows links, Set/Get bus pairs, reroute nodes, etc.
-        function findFilenameDeep(startNode, maxDepth = 8) {
+        function findFilenameDeep(startNode, maxDepth = 12) {
             const visited = new Set();
             const queue = [{ node: startNode, depth: 0 }];
 
@@ -88,7 +82,6 @@ app.registerExtension({
                 if (visited.has(current.id)) continue;
                 visited.add(current.id);
 
-                // Check this node for a filename
                 const fname = getFilenameFromNode(current);
                 if (fname) return fname;
 
@@ -101,7 +94,6 @@ app.registerExtension({
                     const setNodes = resolveGetNode(current);
                     for (const sn of setNodes) {
                         queue.push({ node: sn, depth: depth + 1 });
-                        // Also follow Set node's inputs
                         if (sn.inputs) {
                             for (const inp of sn.inputs) {
                                 if (inp.link == null) continue;
@@ -164,6 +156,13 @@ app.registerExtension({
         node.onExecuted = function (output) {
             origOnExecuted?.apply(this, arguments);
             syncSourceFilename();
+        };
+
+        // Sync before serialization (prompt queue) so Python gets fresh value
+        const origOnSerialize = node.onSerialize;
+        node.onSerialize = function (o) {
+            syncSourceFilename();
+            origOnSerialize?.apply(this, arguments);
         };
 
         // Initial sync + periodic retry (graph may not be fully loaded yet)

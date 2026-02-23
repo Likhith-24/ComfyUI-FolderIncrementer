@@ -63,8 +63,8 @@ class MaskPropagateVideo:
         if src_mask.dim() == 3:
             idx = min(source_frame, src_mask.shape[0] - 1)
             src_mask = src_mask[idx]
-        if src_mask.dim() != 2:
-            src_mask = src_mask.squeeze()
+        while src_mask.dim() > 2:
+            src_mask = src_mask.squeeze(0)
 
         # Resize mask if dimensions don't match
         if src_mask.shape[0] != H or src_mask.shape[1] != W:

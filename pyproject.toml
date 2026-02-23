@@ -2,7 +2,7 @@
 name = "comfyui-customnodepacks"
 description = "Custom node packs for ComfyUI: FolderIncrementer (auto-versioning) + MaskEditControl (pinpoint mask editing with SAM2/SAM3, per-axis erode/expand, point editor, bbox tools, video mask propagation)."
 version = "1.1.0"
-license = "MIT"
+license = {text = "MIT License"}
 requires-python = ">=3.10"
 
 [project.urls]

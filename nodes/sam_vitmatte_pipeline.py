@@ -574,9 +574,9 @@ class SAMViTMattePipelineMEC:
                 rgb = rgb[:, :, :3]
             lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
             # Normalize LAB channels
-            lab[:, :, 0] /= 100.0   # L: 0-100 → 0-1
-            lab[:, :, 1] = (lab[:, :, 1] + 128) / 255.0  # a: -128..127 → 0-1
-            lab[:, :, 2] = (lab[:, :, 2] + 128) / 255.0  # b: -128..127 → 0-1
+            lab[:, :, 0] /= 255.0   # L: 0-255 (uint8 input) → 0-1
+            lab[:, :, 1] /= 255.0   # a: 0-255 (uint8 input) → 0-1
+            lab[:, :, 2] /= 255.0   # b: 0-255 (uint8 input) → 0-1
 
             m_np = mask.cpu().numpy()
             H, W = m_np.shape

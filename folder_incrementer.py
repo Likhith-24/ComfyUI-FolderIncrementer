@@ -118,11 +118,12 @@ class FolderIncrementer:
         version_num = _scan_next_version(date_dir, prefix, padding)
         version_string = f"{prefix}{str(version_num).zfill(padding)}"
 
-        # ── 5. Create the version folder to claim the number ──────────
-        version_dir = os.path.join(date_dir, version_string)
-        os.makedirs(version_dir, exist_ok=True)
-
-        # ── 6. Build output paths ─────────────────────────────────────
+        # ── 5. Build output paths ─────────────────────────────────────
+        #    NOTE: We do NOT create the directory here.  ComfyUI's
+        #    get_save_image_path() calls os.makedirs(full_output_folder,
+        #    exist_ok=True) automatically when the downstream Save node
+        #    runs.  Creating it here would leave empty version folders
+        #    on every queue (because IS_CHANGED returns NaN).
         # subfolder_path : "SC_30_SHT50/02-22-2026/v001"
         subfolder_path = f"{folder_name}/{today_date}/{version_string}"
 

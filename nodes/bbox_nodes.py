@@ -184,6 +184,9 @@ class BBoxCrop:
         y1 = max(0, y)
         x2 = min(W, x + bw)
         y2 = min(H, y + bh)
+        # Guard: ensure crop region is non-empty
+        if x2 <= x1 or y2 <= y1:
+            x1, y1, x2, y2 = 0, 0, min(1, W), min(1, H)
         cropped = image[:, y1:y2, x1:x2, :]
         if mask is not None:
             m = mask

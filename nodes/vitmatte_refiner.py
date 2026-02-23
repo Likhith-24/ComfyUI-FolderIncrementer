@@ -369,9 +369,9 @@ class ViTMatteRefinerMEC:
             if rgb.shape[-1] == 4:
                 rgb = rgb[:, :, :3]
             lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-            lab[:, :, 0] /= 100.0
-            lab[:, :, 1] = (lab[:, :, 1] + 128) / 255.0
-            lab[:, :, 2] = (lab[:, :, 2] + 128) / 255.0
+            lab[:, :, 0] /= 255.0   # L: 0-255 (uint8 input) → 0-1
+            lab[:, :, 1] /= 255.0   # a: 0-255 (uint8 input) → 0-1
+            lab[:, :, 2] /= 255.0   # b: 0-255 (uint8 input) → 0-1
 
             m_np = mask.cpu().numpy().astype(np.float32)
             eps = (1 - detail_level) ** 2 * 0.02 + 1e-6

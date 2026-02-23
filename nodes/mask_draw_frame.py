@@ -75,8 +75,9 @@ class MaskDrawFrame:
             r = float(params.get("radius", 50))
             dist = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
             if feather > 0:
-                canvas = (1.0 - ((dist - r) / feather).clamp(0, 1)) * value
-                canvas[dist <= r] = value
+                canvas = torch.where(dist <= r,
+                                     torch.tensor(value),
+                                     ((1.0 - ((dist - r) / feather).clamp(0, 1)) * value))
             else:
                 canvas[dist <= r] = value
 
@@ -107,8 +108,9 @@ class MaskDrawFrame:
             ry_ = (-dx * sin_a + dy * cos_a) / max(ry, 1e-6)
             dist = torch.sqrt(rx_ ** 2 + ry_ ** 2)
             if feather > 0:
-                canvas = (1.0 - ((dist - 1.0) * min(rx, ry) / feather).clamp(0, 1)) * value
-                canvas[dist <= 1.0] = value
+                canvas = torch.where(dist <= 1.0,
+                                     torch.tensor(value),
+                                     ((1.0 - ((dist - 1.0) * min(rx, ry) / feather).clamp(0, 1)) * value))
             else:
                 canvas[dist <= 1.0] = value
 

@@ -81,7 +81,9 @@ class MaskPreviewOverlay:
 
             elif display_mode == "side_by_side":
                 mask_vis = mi.unsqueeze(-1).expand(H, W, 3)
-                frame = torch.cat([frame, mask_vis], dim=1)  # wider
+                # Ensure frame is 3-channel for cat (drop alpha if RGBA)
+                frame_rgb = frame[:, :, :3] if frame.shape[-1] > 3 else frame
+                frame = torch.cat([frame_rgb, mask_vis], dim=1)  # wider
 
             elif display_mode == "checkerboard":
                 checker = self._checkerboard(H, W, 16, image.device)
@@ -110,9 +112,9 @@ class MaskPreviewOverlay:
 
             if display_mode == "side_by_side":
                 # Need to handle differently – output is wider
-                # Rebuild output for this batch item
+                # Rebuild output for this batch item (always 3-channel)
                 if i == 0:
-                    out = torch.zeros(B, H, W * 2, C, device=image.device, dtype=image.dtype)
+                    out = torch.zeros(B, H, W * 2, 3, device=image.device, dtype=image.dtype)
                 out[i] = frame
             else:
                 out[i] = frame

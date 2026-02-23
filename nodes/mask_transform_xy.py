@@ -5,7 +5,7 @@ offset, and feather with sub-pixel precision.
 
 import torch
 import torch.nn.functional as F
-import numpy as np
+
 
 
 class MaskTransformXY:

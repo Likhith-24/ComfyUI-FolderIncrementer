@@ -27,6 +27,8 @@ from .nodes.mask_math import MaskMath
 from .nodes.bbox_nodes import BBoxCreate, BBoxFromMask, BBoxToMask, BBoxPad, BBoxCrop
 from .nodes.vitmatte_refiner import ViTMatteRefinerMEC
 from .nodes.sam_vitmatte_pipeline import SAMViTMattePipelineMEC
+from .nodes.trimap_generator import TrimapGeneratorMEC
+from .nodes.video_frame_extractor import VideoFrameExtractorMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -46,6 +48,8 @@ _MEC_MAPPINGS = {
     "BBoxCrop": BBoxCrop,
     "ViTMatteRefinerMEC": ViTMatteRefinerMEC,
     "SAMViTMattePipelineMEC": SAMViTMattePipelineMEC,
+    "TrimapGeneratorMEC": TrimapGeneratorMEC,
+    "VideoFrameExtractorMEC": VideoFrameExtractorMEC,
 }
 
 _MEC_DISPLAY = {
@@ -66,6 +70,8 @@ _MEC_DISPLAY = {
     "BBoxCrop": "BBox Crop (MEC)",
     "ViTMatteRefinerMEC": "ViTMatte Edge Refiner (MEC)",
     "SAMViTMattePipelineMEC": "SAM + ViTMatte Pipeline (MEC)",
+    "TrimapGeneratorMEC": "Trimap Generator (MEC)",
+    "VideoFrameExtractorMEC": "Video Frame Extractor (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────

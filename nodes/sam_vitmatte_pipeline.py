@@ -9,7 +9,7 @@ Pipeline stages:
   4. **Multi-scale fusion** – blend multiple scales for fine detail
   5. **Post-processing** – morphological cleanup, hole filling
 
-Designed for compositing-grade alpha mattes from a single click.
+All shared computation delegates to nodes.utils.
 """
 
 import torch
@@ -18,11 +18,30 @@ import numpy as np
 import json
 import gc
 
+from .utils import (
+    HAS_CV2,
+    get_sam_predictor,
+    refine_with_vitmatte,
+    multi_scale_guided_refine,
+    color_aware_refine,
+    guided_filter,
+    compute_edge_band_np,
+    compute_edge_band_torch,
+    gaussian_edge_refine,
+    boost_edge_contrast,
+    generate_trimap,
+    build_laplacian_pyramid,
+    reconstruct_laplacian_pyramid,
+    fill_holes,
+    remove_small_regions,
+    mask_to_bbox,
+    make_split_preview,
+)
+
 try:
     import cv2
-    HAS_CV2 = True
 except ImportError:
-    HAS_CV2 = False
+    pass
 
 
 class SAMViTMattePipelineMEC:
@@ -31,10 +50,6 @@ class SAMViTMattePipelineMEC:
     Combines SAM segmentation with ViTMatte-quality edge refinement
     in a single node for maximum accuracy and precision.
     """
-
-    # Class-level cache so the ViTMatte model is loaded only once
-    _vitmatte_model = None
-    _vitmatte_processor = None
 
     REFINE_METHODS = ["auto", "vitmatte", "guided_filter", "multi_scale_guided",
                       "color_aware", "laplacian_blend"]
@@ -86,11 +101,11 @@ class SAMViTMattePipelineMEC:
                     "default": 1.0, "min": 0.0, "max": 3.0, "step": 0.1,
                     "tooltip": "Boost edge contrast for challenging lighting. >1 sharpens boundaries.",
                 }),
-                "fill_holes": ("BOOLEAN", {
+                "fill_holes_enabled": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Fill interior holes in the mask",
                 }),
-                "remove_small_regions": ("INT", {
+                "min_region_size": ("INT", {
                     "default": 64, "min": 0, "max": 10000, "step": 1,
                     "tooltip": "Remove isolated mask regions smaller than N pixels (0=disabled)",
                 }),
@@ -117,8 +132,8 @@ class SAMViTMattePipelineMEC:
 
     def execute(self, sam_model, image, points_json, bbox_json,
                 sam_iterations, refine_method, edge_radius,
-                detail_preservation, edge_contrast, fill_holes,
-                remove_small_regions, multimask_output, mask_index,
+                detail_preservation, edge_contrast, fill_holes_enabled,
+                min_region_size, multimask_output, mask_index,
                 score_threshold, bbox=None, existing_mask=None, trimap=None):
 
         model_info = sam_model
@@ -156,30 +171,30 @@ class SAMViTMattePipelineMEC:
 
         # ── Stage 2: Post-process coarse mask ─────────────────────────
         coarse_np = coarse_mask.cpu().numpy()
-        if fill_holes and HAS_CV2:
-            coarse_np = self._fill_holes(coarse_np)
-        if remove_small_regions > 0 and HAS_CV2:
-            coarse_np = self._remove_small(coarse_np, remove_small_regions)
+        if fill_holes_enabled and HAS_CV2:
+            coarse_np = fill_holes(coarse_np)
+        if min_region_size > 0 and HAS_CV2:
+            coarse_np = remove_small_regions(coarse_np, min_region_size)
         coarse_mask = torch.from_numpy(coarse_np)
 
         # ── Stage 3: Edge-aware matting refinement ────────────────────
         refined_mask = self._refine_edges(
-            img_tensor, coarse_mask, refine_method, edge_radius,
-            detail_preservation, edge_contrast, trimap,
+            img_tensor, img_np, coarse_mask, coarse_np,
+            refine_method, edge_radius, detail_preservation, trimap,
         )
 
         # ── Stage 4: Edge contrast boost ──────────────────────────────
         if edge_contrast != 1.0:
-            refined_mask = self._boost_edge_contrast(
-                refined_mask, coarse_mask, edge_contrast
+            refined_mask = boost_edge_contrast(
+                refined_mask, coarse_mask, edge_contrast, 10
             )
 
         refined_mask = refined_mask.clamp(0, 1)
 
         # ── Outputs ───────────────────────────────────────────────────
         edge_mask = torch.abs(refined_mask - (coarse_mask > 0.5).float())
-        det_bbox = self._mask_to_bbox(refined_mask, W, H)
-        preview = self._make_pipeline_preview(img_tensor, refined_mask, coarse_mask)
+        det_bbox = mask_to_bbox(refined_mask, W, H)
+        preview = make_split_preview(img_tensor, refined_mask, coarse_mask)
 
         info = json.dumps({
             "model_type": model_type,
@@ -213,16 +228,13 @@ class SAMViTMattePipelineMEC:
                        existing_mask, H, W):
         """Run SAM multiple times, using previous mask to refine prompts."""
 
-        # Build predictor once, set image once
-        predictor = self._get_predictor(model, model_type, img_np)
+        predictor = get_sam_predictor(model, model_type, img_np)
         if predictor is None:
-            empty = np.zeros((H, W), dtype=np.float32)
-            return torch.from_numpy(empty), 0.0
+            return torch.zeros((H, W), dtype=torch.float32), 0.0
 
-        # Initial prompts
         point_coords, point_labels = self._points_to_arrays(points_list)
 
-        # If we have an existing mask, use it as starting point
+        # Use existing mask as starting point if provided
         current_mask = None
         if existing_mask is not None:
             m = existing_mask[0] if existing_mask.dim() == 3 else existing_mask
@@ -234,7 +246,6 @@ class SAMViTMattePipelineMEC:
         best_score = 0.0
 
         for iteration in range(iterations):
-            # On iterations > 0, augment prompts from previous mask
             iter_coords = point_coords
             iter_labels = point_labels
             iter_box = box_np
@@ -248,15 +259,12 @@ class SAMViTMattePipelineMEC:
                 if aug_box is not None:
                     iter_box = aug_box
 
-            # Run SAM prediction
+            # Run SAM prediction with optional mask input from previous iteration
             try:
-                # Provide mask_input from previous iteration for SAM2
                 mask_input = None
                 if iteration > 0 and current_mask is not None:
-                    # SAM expects logits as mask input (inverse sigmoid)
                     m_logit = np.clip(current_mask, 1e-6, 1 - 1e-6)
                     m_logit = np.log(m_logit / (1 - m_logit))
-                    # Resize to 256x256 (SAM's internal mask resolution)
                     if HAS_CV2:
                         mask_input = cv2.resize(m_logit, (256, 256),
                                                  interpolation=cv2.INTER_LINEAR)
@@ -272,7 +280,6 @@ class SAMViTMattePipelineMEC:
                     multimask_output=multimask,
                 )
             except TypeError:
-                # Some predictors don't support mask_input
                 masks_np, scores, _ = predictor.predict(
                     point_coords=iter_coords,
                     point_labels=iter_labels,
@@ -285,7 +292,6 @@ class SAMViTMattePipelineMEC:
             if masks_np is None or len(masks_np) == 0:
                 break
 
-            # Select best mask
             scores_list = scores.tolist() if hasattr(scores, 'tolist') else list(scores)
             if score_threshold > 0:
                 valid = [i for i, s in enumerate(scores_list) if s >= score_threshold]
@@ -296,7 +302,6 @@ class SAMViTMattePipelineMEC:
             current_mask = masks_np[idx].astype(np.float32)
             best_score = float(scores_list[idx])
 
-            # If score is very high, no need for more iterations
             if best_score > 0.98:
                 break
 
@@ -307,17 +312,10 @@ class SAMViTMattePipelineMEC:
 
     def _augment_prompts_from_mask(self, mask, orig_coords, orig_labels,
                                     orig_box, H, W):
-        """Generate additional prompts from the previous mask iteration.
-
-        Strategy:
-          - Sample positive points from mask interior (eroded)
-          - Sample negative points from just outside mask boundary
-          - Derive tighter bbox from mask
-        """
+        """Generate additional prompts from the previous mask iteration."""
         coords_list = []
         labels_list = []
 
-        # Keep original prompts
         if orig_coords is not None:
             coords_list.append(orig_coords)
             labels_list.append(orig_labels)
@@ -337,7 +335,6 @@ class SAMViTMattePipelineMEC:
             n = min(3, len(interior_pts))
             indices = np.linspace(0, len(interior_pts) - 1, n, dtype=int)
             sampled = interior_pts[indices]
-            # Convert (y,x) → (x,y) for SAM
             coords_list.append(sampled[:, ::-1].astype(np.float32))
             labels_list.append(np.ones(n, dtype=np.int32))
 
@@ -371,329 +368,98 @@ class SAMViTMattePipelineMEC:
         return all_coords, all_labels, box
 
     # ══════════════════════════════════════════════════════════════════
-    #  STAGE 3 – Edge-aware matting
+    #  STAGE 3 – Edge-aware matting (delegates to utils)
     # ══════════════════════════════════════════════════════════════════
 
-    def _refine_edges(self, img, mask, method, edge_radius,
-                      detail_pres, edge_contrast, trimap):
-        """Dispatch to the chosen refinement backend."""
-        H, W = img.shape[:2]
+    def _refine_edges(self, img, img_np, mask, mask_np,
+                      method, edge_radius, detail_pres, trimap_input):
+        """Dispatch to the chosen refinement backend via shared utils."""
 
         if method == "auto":
-            result = self._try_vitmatte(img, mask, edge_radius, detail_pres, trimap)
+            tri = trimap_input[0] if (trimap_input is not None and trimap_input.dim() == 3) else trimap_input
+            result = refine_with_vitmatte(img, mask, edge_radius, trimap_input=tri)
             if result is None:
-                result = self._multi_scale_guided(img, mask, edge_radius, detail_pres)
+                r = multi_scale_guided_refine(img_np, mask_np, edge_radius, detail_pres)
+                if r is not None:
+                    result = torch.from_numpy(r)
             if result is None:
-                result = self._guided_filter_refine(img, mask, edge_radius, detail_pres)
+                result = self._try_guided_single(img_np, mask_np, edge_radius, detail_pres)
             if result is None:
-                result = self._gaussian_edge_refine(mask, edge_radius)
+                result = gaussian_edge_refine(mask, edge_radius)
             return result
 
-        elif method == "vitmatte":
-            r = self._try_vitmatte(img, mask, edge_radius, detail_pres, trimap)
-            return r if r is not None else self._multi_scale_guided(img, mask, edge_radius, detail_pres) or self._gaussian_edge_refine(mask, edge_radius)
+        if method == "vitmatte":
+            tri = trimap_input[0] if (trimap_input is not None and trimap_input.dim() == 3) else trimap_input
+            r = refine_with_vitmatte(img, mask, edge_radius, trimap_input=tri)
+            if r is not None:
+                return r
+            r2 = multi_scale_guided_refine(img_np, mask_np, edge_radius, detail_pres)
+            return torch.from_numpy(r2) if r2 is not None else gaussian_edge_refine(mask, edge_radius)
 
-        elif method == "multi_scale_guided":
-            r = self._multi_scale_guided(img, mask, edge_radius, detail_pres)
-            return r if r is not None else self._gaussian_edge_refine(mask, edge_radius)
+        if method == "multi_scale_guided":
+            r = multi_scale_guided_refine(img_np, mask_np, edge_radius, detail_pres)
+            return torch.from_numpy(r) if r is not None else gaussian_edge_refine(mask, edge_radius)
 
-        elif method == "guided_filter":
-            r = self._guided_filter_refine(img, mask, edge_radius, detail_pres)
-            return r if r is not None else self._gaussian_edge_refine(mask, edge_radius)
+        if method == "guided_filter":
+            r = self._try_guided_single(img_np, mask_np, edge_radius, detail_pres)
+            return r if r is not None else gaussian_edge_refine(mask, edge_radius)
 
-        elif method == "color_aware":
-            r = self._color_aware_refine(img, mask, edge_radius, detail_pres)
-            return r if r is not None else self._gaussian_edge_refine(mask, edge_radius)
+        if method == "color_aware":
+            r = color_aware_refine(img_np, mask_np, edge_radius, detail_pres)
+            return torch.from_numpy(r) if r is not None else gaussian_edge_refine(mask, edge_radius)
 
-        elif method == "laplacian_blend":
-            r = self._laplacian_refine(img, mask, edge_radius, detail_pres)
-            return r if r is not None else self._gaussian_edge_refine(mask, edge_radius)
+        if method == "laplacian_blend":
+            r = self._try_laplacian(mask_np, edge_radius, detail_pres)
+            return r if r is not None else gaussian_edge_refine(mask, edge_radius)
 
-        return self._gaussian_edge_refine(mask, edge_radius)
+        return gaussian_edge_refine(mask, edge_radius)
 
-    # ── ViTMatte ──────────────────────────────────────────────────────
-    @classmethod
-    def _load_vitmatte_model(cls):
-        """Load ViTMatte model once and cache at class level.
-        Tries local path first, then auto-downloads from HuggingFace."""
-        if cls._vitmatte_model is not None:
-            return cls._vitmatte_model, cls._vitmatte_processor
-
-        from transformers import VitMatteForImageMatting, VitMatteImageProcessor
-
-        model = None
-        # Try local model path: ComfyUI/models/vitmatte/
-        try:
-            import folder_paths
-            local_dirs = []
-            if "vitmatte" in folder_paths.folder_names_and_paths:
-                local_dirs = folder_paths.get_folder_paths("vitmatte")
-            else:
-                import os
-                for base in folder_paths.base_path, folder_paths.models_dir:
-                    candidate = os.path.join(base, "vitmatte")
-                    if os.path.isdir(candidate):
-                        local_dirs.append(candidate)
-
-            for local_dir in local_dirs:
-                import os
-                if os.path.isdir(local_dir) and any(
-                    f.endswith(('.safetensors', '.bin', '.pt'))
-                    for f in os.listdir(local_dir)
-                ):
-                    model = VitMatteForImageMatting.from_pretrained(local_dir)
-                    break
-        except Exception:
-            pass
-
-        if model is None:
-            # Auto-download from HuggingFace (cached locally after first download)
-            model = VitMatteForImageMatting.from_pretrained(
-                "hustvl/vitmatte-small-distinctions-646"
-            )
-
-        processor = VitMatteImageProcessor()
-        model.eval()
-
-        cls._vitmatte_model = model
-        cls._vitmatte_processor = processor
-        return model, processor
-
-    def _try_vitmatte(self, img, mask, edge_radius, detail_pres, trimap_input):
-        try:
-            from transformers import VitMatteForImageMatting, VitMatteImageProcessor
-            from PIL import Image as PILImage
-        except ImportError:
-            return None
-
-        try:
-            img_np = (img.cpu().numpy() * 255).astype(np.uint8)
-            mask_np = mask.cpu().numpy()
-
-            if trimap_input is not None:
-                tri = trimap_input[0].cpu().numpy() if trimap_input.dim() == 3 else trimap_input.cpu().numpy()
-            else:
-                tri = self._generate_trimap(mask_np, edge_radius)
-
-            model, processor = self._load_vitmatte_model()
-
-            pil_img = PILImage.fromarray(img_np)
-            pil_tri = PILImage.fromarray((tri * 255).astype(np.uint8), mode="L")
-
-            inputs = processor(images=pil_img, trimaps=pil_tri, return_tensors="pt")
-
-            device = next(model.parameters()).device if hasattr(model, 'parameters') else "cpu"
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-
-            with torch.no_grad():
-                alpha = model(**inputs).alphas[0, 0]
-
-            # Blend ViTMatte alpha with coarse mask in non-edge regions
-            edge_band = self._compute_edge_band(mask_np, edge_radius)
-            edge_band_t = torch.from_numpy(edge_band)
-            result = mask * (1 - edge_band_t) + alpha.cpu() * edge_band_t
-
-            return result
-        except Exception:
-            return None
-
-    # ── Multi-scale guided filter (best non-neural) ───────────────────
-    def _multi_scale_guided(self, img, mask, edge_radius, detail_pres):
-        """Run guided filter at 3 scales, fuse for fine + coarse detail."""
-        if not HAS_CV2:
-            return None
-
-        try:
-            guide = (img.cpu().numpy() * 255).astype(np.uint8)
-            if guide.shape[-1] == 4:
-                guide = guide[:, :, :3]
-            guide_f = guide.astype(np.float32) / 255.0
-            m_np = mask.cpu().numpy()
-            H, W = m_np.shape
-
-            # Three scales: fine, medium, coarse
-            scales = [
-                {"radius": max(1, edge_radius // 3), "eps": (1 - detail_pres) ** 2 * 0.01 + 1e-6},
-                {"radius": max(1, edge_radius),       "eps": (1 - detail_pres) ** 2 * 0.05 + 1e-4},
-                {"radius": max(1, edge_radius * 3),   "eps": (1 - detail_pres) ** 2 * 0.2  + 1e-3},
-            ]
-
-            results = []
-            for s in scales:
-                # Per-channel guided filter for better color-edge adherence
-                acc = np.zeros_like(m_np)
-                for ch in range(min(3, guide_f.shape[2])):
-                    g = guide_f[:, :, ch]
-                    filtered = self._guided_filter_impl(g, m_np, s["radius"], s["eps"])
-                    acc += filtered
-                acc /= min(3, guide_f.shape[2])
-                results.append(np.clip(acc, 0, 1))
-
-            # Fuse: fine detail near edges, coarse elsewhere
-            edge_band = self._compute_edge_band(m_np, edge_radius)
-            fine_band  = np.clip(edge_band * 2, 0, 1)  # narrow band
-            coarse_inv = 1 - fine_band
-
-            fused = (results[0] * fine_band * detail_pres +
-                     results[1] * fine_band * (1 - detail_pres) +
-                     results[2] * coarse_inv * 0.3 +
-                     m_np * coarse_inv * 0.7)
-
-            return torch.from_numpy(np.clip(fused, 0, 1).astype(np.float32))
-        except Exception:
-            return None
-
-    # ── Single-scale guided filter ────────────────────────────────────
-    def _guided_filter_refine(self, img, mask, edge_radius, detail_pres):
+    @staticmethod
+    def _try_guided_single(img_np, mask_np, edge_radius, detail_pres):
+        """Single-scale guided filter refinement."""
         if not HAS_CV2:
             return None
         try:
-            guide = (img.cpu().numpy() * 255).astype(np.uint8)
-            if guide.shape[-1] == 4:
-                guide = guide[:, :, :3]
+            guide = img_np[:, :, :3]
             gray = cv2.cvtColor(guide, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-            m_np = mask.cpu().numpy()
             eps = (1 - detail_pres) ** 2 * 0.1 + 1e-6
-
-            filtered = self._guided_filter_impl(gray, m_np, max(1, edge_radius), eps)
-            edge_band = self._compute_edge_band(m_np, edge_radius)
-            result = m_np * (1 - edge_band) + np.clip(filtered, 0, 1) * edge_band
-
+            filtered = guided_filter(gray, mask_np, max(1, edge_radius), eps)
+            edge_band = compute_edge_band_np(mask_np, edge_radius)
+            result = mask_np * (1 - edge_band) + np.clip(filtered, 0, 1) * edge_band
             return torch.from_numpy(result.astype(np.float32))
         except Exception:
             return None
 
-    # ── Color-aware refinement (LAB space) ────────────────────────────
-    def _color_aware_refine(self, img, mask, edge_radius, detail_pres):
-        """Use LAB color space for lighting-invariant edge detection."""
+    @staticmethod
+    def _try_laplacian(mask_np, edge_radius, detail_pres):
+        """Laplacian pyramid refinement."""
         if not HAS_CV2:
             return None
         try:
-            rgb = (img.cpu().numpy() * 255).astype(np.uint8)
-            if rgb.shape[-1] == 4:
-                rgb = rgb[:, :, :3]
-            lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-            # Normalize LAB channels
-            lab[:, :, 0] /= 255.0   # L: 0-255 (uint8 input) → 0-1
-            lab[:, :, 1] /= 255.0   # a: 0-255 (uint8 input) → 0-1
-            lab[:, :, 2] /= 255.0   # b: 0-255 (uint8 input) → 0-1
-
-            m_np = mask.cpu().numpy()
-            H, W = m_np.shape
-            eps = (1 - detail_pres) ** 2 * 0.02 + 1e-6
-
-            # Guided filter per LAB channel
-            acc = np.zeros_like(m_np)
-            weights = [0.5, 0.25, 0.25]  # L gets more weight (luminance invariance)
-            for ch, w in zip(range(3), weights):
-                g = lab[:, :, ch]
-                filtered = self._guided_filter_impl(g, m_np, max(1, edge_radius), eps)
-                acc += filtered * w
-
-            edge_band = self._compute_edge_band(m_np, edge_radius)
-            result = m_np * (1 - edge_band) + np.clip(acc, 0, 1) * edge_band
-
-            return torch.from_numpy(result.astype(np.float32))
-        except Exception:
-            return None
-
-    # ── Laplacian pyramid refinement ──────────────────────────────────
-    def _laplacian_refine(self, img, mask, edge_radius, detail_pres):
-        if not HAS_CV2:
-            return None
-        try:
-            m_np = mask.cpu().numpy()
-            H, W = m_np.shape
+            H, W = mask_np.shape
             levels = min(4, int(np.log2(min(H, W))) - 2)
             if levels < 1:
-                return self._gaussian_edge_refine(mask, edge_radius)
+                return None
 
             blur_k = max(1, edge_radius * 2) | 1
-            soft = cv2.GaussianBlur(m_np, (blur_k, blur_k), edge_radius * 0.4 + 0.1)
+            soft = cv2.GaussianBlur(mask_np, (blur_k, blur_k), edge_radius * 0.4 + 0.1)
 
-            pyr_m = self._build_lap_pyr(m_np, levels)
-            pyr_s = self._build_lap_pyr(soft, levels)
+            pyr_m = build_laplacian_pyramid(mask_np, levels)
+            pyr_s = build_laplacian_pyramid(soft, levels)
 
             result_pyr = []
             for i, (pm, ps) in enumerate(zip(pyr_m, pyr_s)):
                 w = (i + 1) / len(pyr_m) * (1 - detail_pres)
                 result_pyr.append(pm * (1 - w) + ps * w)
 
-            result = self._reconstruct_lap_pyr(result_pyr)
+            result = reconstruct_laplacian_pyramid(result_pyr)
             return torch.from_numpy(np.clip(result, 0, 1).astype(np.float32))
         except Exception:
             return None
 
-    # ── Gaussian fallback ─────────────────────────────────────────────
-    def _gaussian_edge_refine(self, mask, edge_radius):
-        m = mask.clone()
-        sigma = max(0.5, edge_radius * 0.4)
-        k = int(sigma * 6) | 1
-        if k < 3: k = 3
-
-        x = torch.arange(k, dtype=torch.float32, device=m.device) - k // 2
-        kernel = torch.exp(-x ** 2 / (2 * sigma ** 2))
-        kernel /= kernel.sum()
-
-        m4 = m.unsqueeze(0).unsqueeze(0)
-        pad = k // 2
-        kh = kernel.view(1, 1, 1, -1)
-        kv = kernel.view(1, 1, -1, 1)
-        m4 = F.conv2d(F.pad(m4, (pad, pad, 0, 0), "replicate"), kh)
-        m4 = F.conv2d(F.pad(m4, (0, 0, pad, pad), "replicate"), kv)
-        blurred = m4[0, 0]
-
-        edge_band = self._get_edge_band_torch(mask, edge_radius)
-        return mask * (1 - edge_band) + blurred * edge_band
-
     # ══════════════════════════════════════════════════════════════════
-    #  STAGE 4 – Edge contrast boost
+    #  Prompt parsing
     # ══════════════════════════════════════════════════════════════════
-
-    def _boost_edge_contrast(self, refined, coarse, contrast):
-        """Apply contrast curve to edge regions for sharper/softer boundaries."""
-        edge_band = self._get_edge_band_torch(coarse, 10)
-
-        # Sigmoid-based contrast at edges
-        shifted = (refined - 0.5) * contrast
-        boosted = torch.sigmoid(shifted * 5)  # steeper sigmoid
-
-        result = refined * (1 - edge_band) + boosted * edge_band
-        return result
-
-    # ══════════════════════════════════════════════════════════════════
-    #  Utility methods
-    # ══════════════════════════════════════════════════════════════════
-
-    def _get_predictor(self, model, model_type, img_np):
-        """Get the appropriate SAM predictor and set its image."""
-        predictor = None
-
-        if model_type in ("sam2", "sam2.1"):
-            try:
-                from sam2.sam2_image_predictor import SAM2ImagePredictor
-                predictor = SAM2ImagePredictor(model)
-            except ImportError:
-                pass
-
-        elif model_type == "sam3":
-            try:
-                from sam3.predictor import SAM3Predictor
-                predictor = SAM3Predictor(model)
-            except ImportError:
-                pass
-
-        else:
-            try:
-                from segment_anything import SamPredictor
-                predictor = SamPredictor(model)
-            except ImportError:
-                pass
-
-        if predictor is not None:
-            predictor.set_image(img_np)
-
-        return predictor
 
     @staticmethod
     def _parse_points(points_json):
@@ -729,153 +495,3 @@ class SAMViTMattePipelineMEC:
             except json.JSONDecodeError:
                 pass
         return None
-
-    @staticmethod
-    def _generate_trimap(mask_np, edge_radius):
-        """Generate a high-quality trimap from binary mask."""
-        if not HAS_CV2:
-            return mask_np
-        binary = (mask_np > 0.5).astype(np.uint8) * 255
-        # Use two kernel sizes for asymmetric unknown band
-        kern_inner = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (edge_radius * 2 + 1, edge_radius * 2 + 1))
-        kern_outer = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (int(edge_radius * 1.5) * 2 + 1,) * 2)
-        fg = cv2.erode(binary, kern_inner)
-        bg_region = 255 - cv2.dilate(binary, kern_outer)
-
-        trimap = np.full_like(mask_np, 0.5, dtype=np.float32)
-        trimap[fg > 127] = 1.0
-        trimap[bg_region > 127] = 0.0
-        return trimap
-
-    @staticmethod
-    def _compute_edge_band(mask_np, radius):
-        """Compute a smooth edge band around the mask boundary."""
-        if not HAS_CV2:
-            return np.zeros_like(mask_np)
-        binary = (mask_np > 0.5).astype(np.uint8)
-        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                          (radius * 2 + 1, radius * 2 + 1))
-        dilated = cv2.dilate(binary, kern)
-        eroded  = cv2.erode(binary, kern)
-        band = (dilated - eroded).astype(np.float32)
-        # Smooth the band
-        blur_k = max(3, radius) | 1
-        band = cv2.GaussianBlur(band, (blur_k, blur_k), radius * 0.3)
-        return np.clip(band, 0, 1)
-
-    @staticmethod
-    def _get_edge_band_torch(mask, radius):
-        """PyTorch edge band computation."""
-        k = radius * 2 + 1
-        pad = radius
-        kernel = torch.ones(1, 1, k, k, device=mask.device) / (k * k)
-        m4 = mask.unsqueeze(0).unsqueeze(0)
-        avg = F.conv2d(F.pad(m4, (pad, pad, pad, pad), "replicate"), kernel)[0, 0]
-        band = 1.0 - torch.abs(avg * 2 - 1)
-        return band.clamp(0, 1)
-
-    def _guided_filter_impl(self, guide, src, radius, eps):
-        """Manual guided filter (works without cv2.ximgproc)."""
-        ksize = radius * 2 + 1
-        mean_I  = cv2.blur(guide, (ksize, ksize))
-        mean_p  = cv2.blur(src,   (ksize, ksize))
-        mean_Ip = cv2.blur(guide * src,   (ksize, ksize))
-        mean_II = cv2.blur(guide * guide, (ksize, ksize))
-
-        cov_Ip = mean_Ip - mean_I * mean_p
-        var_I  = mean_II - mean_I * mean_I
-
-        a = cov_Ip / (var_I + eps)
-        b = mean_p - a * mean_I
-
-        mean_a = cv2.blur(a, (ksize, ksize))
-        mean_b = cv2.blur(b, (ksize, ksize))
-        return mean_a * guide + mean_b
-
-    @staticmethod
-    def _build_lap_pyr(img, levels):
-        pyr = []
-        cur = img.copy()
-        for _ in range(levels):
-            down = cv2.pyrDown(cur)
-            up = cv2.pyrUp(down, dstsize=(cur.shape[1], cur.shape[0]))
-            pyr.append(cur - up)
-            cur = down
-        pyr.append(cur)
-        return pyr
-
-    @staticmethod
-    def _reconstruct_lap_pyr(pyr):
-        cur = pyr[-1]
-        for i in range(len(pyr) - 2, -1, -1):
-            up = cv2.pyrUp(cur, dstsize=(pyr[i].shape[1], pyr[i].shape[0]))
-            cur = up + pyr[i]
-        return cur
-
-    @staticmethod
-    def _fill_holes(mask_np):
-        """Fill interior holes using contour hierarchy."""
-        binary = (mask_np > 0.5).astype(np.uint8) * 255
-        contours, hierarchy = cv2.findContours(binary, cv2.RETR_CCOMP,
-                                                cv2.CHAIN_APPROX_SIMPLE)
-        if hierarchy is not None:
-            for i, h in enumerate(hierarchy[0]):
-                if h[3] >= 0:  # has parent → is a hole
-                    cv2.drawContours(binary, contours, i, 255, -1)
-        return (binary > 127).astype(np.float32)
-
-    @staticmethod
-    def _remove_small(mask_np, min_area):
-        """Remove connected components smaller than min_area pixels."""
-        binary = (mask_np > 0.5).astype(np.uint8)
-        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
-        result = np.zeros_like(binary)
-        for i in range(1, n_labels):
-            if stats[i, cv2.CC_STAT_AREA] >= min_area:
-                result[labels == i] = 1
-        return result.astype(np.float32)
-
-    @staticmethod
-    def _mask_to_bbox(mask, W, H):
-        coords = torch.nonzero(mask > 0.5, as_tuple=False)
-        if coords.shape[0] > 0:
-            y_min = int(coords[:, 0].min().item())
-            y_max = int(coords[:, 0].max().item())
-            x_min = int(coords[:, 1].min().item())
-            x_max = int(coords[:, 1].max().item())
-            return [x_min, y_min, x_max - x_min + 1, y_max - y_min + 1]
-        return [0, 0, W, H]
-
-    @staticmethod
-    def _make_pipeline_preview(img, refined, coarse):
-        """Side-by-side preview: left=coarse overlay, right=refined overlay."""
-        H, W = img.shape[:2]
-
-        preview = img.clone()
-        if preview.shape[-1] == 4:
-            preview = preview[:, :, :3]
-
-        half = W // 2
-
-        # Left half: coarse mask (blue tint)
-        left = preview[:, :half, :].clone()
-        cm = coarse[:, :half]
-        left[:, :, 2] = torch.clamp(left[:, :, 2] + cm * 0.35, 0, 1)
-
-        # Right half: refined mask (green tint)
-        right = preview[:, half:, :].clone()
-        rm = refined[:, half:]
-        right[:, :, 1] = torch.clamp(right[:, :, 1] + rm * 0.35, 0, 1)
-
-        # Dividing line
-        result = preview.clone()
-        result[:, :half] = left
-        result[:, half:] = right
-        if half > 0 and half < W:
-            result[:, half-1:half+1, 0] = 1.0
-            result[:, half-1:half+1, 1] = 1.0
-            result[:, half-1:half+1, 2] = 0.0
-
-        return result

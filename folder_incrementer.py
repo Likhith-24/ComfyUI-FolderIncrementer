@@ -3,6 +3,15 @@ import re
 from datetime import datetime
 
 
+# Date format selector → strftime mapping
+DATE_FORMAT_MAP = {
+    "MM-DD-YYYY": "%m-%d-%Y",
+    "DD-MM-YYYY": "%d-%m-%Y",
+    "YYYY-MM-DD": "%Y-%m-%d",
+}
+DATE_FORMAT_CHOICES = list(DATE_FORMAT_MAP.keys())
+
+
 def _get_output_dir():
     """Return ComfyUI output directory, with fallback for standalone use."""
     try:
@@ -67,6 +76,10 @@ class FolderIncrementer:
                     "tooltip": "Zero-pad width (3 → 001)"}),
                 "label": ("STRING", {"default": "default",
                     "tooltip": "Fallback folder name (used only when no source file is connected)"}),
+                "date_format": (DATE_FORMAT_CHOICES, {
+                    "default": "MM-DD-YYYY",
+                    "tooltip": "Date format for the date subfolder (e.g. 02-22-2026 or 2026-02-22)",
+                }),
             },
             "optional": {
                 "trigger": ("*", {
@@ -92,6 +105,7 @@ class FolderIncrementer:
         return float("NaN")
 
     def increment(self, prefix="v", padding=3, label="default",
+                  date_format="MM-DD-YYYY",
                   trigger=None, source_filename="", base_path=""):
 
         # ── 1. Derive names from source file ──────────────────────────
@@ -109,8 +123,9 @@ class FolderIncrementer:
                     if base_path and base_path.strip()
                     else _get_output_dir())
 
-        # ── 3. Build date folder (MM-DD-YYYY) ─────────────────────────
-        today_date = datetime.now().strftime("%m-%d-%Y")
+        # ── 3. Build date folder ─────────────────────────────────────
+        fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
+        today_date = datetime.now().strftime(fmt)
 
         # ── 4. Scan for next version INSIDE the date folder ───────────
         #    Structure: base_dir / folder_name / today_date / v###
@@ -158,6 +173,10 @@ class FolderIncrementerReset:
             "required": {
                 "label": ("STRING", {"default": "default",
                     "tooltip": "Folder name to inspect"}),
+                "date_format": (DATE_FORMAT_CHOICES, {
+                    "default": "MM-DD-YYYY",
+                    "tooltip": "Date format (must match what FolderIncrementer uses)",
+                }),
             },
             "optional": {
                 "trigger": ("*", {}),
@@ -176,9 +195,11 @@ class FolderIncrementerReset:
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")
 
-    def check(self, label="default", trigger=None, base_path=""):
+    def check(self, label="default", date_format="MM-DD-YYYY",
+               trigger=None, base_path=""):
         base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
-        today_date = datetime.now().strftime("%m-%d-%Y")
+        fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
+        today_date = datetime.now().strftime(fmt)
         scan_dir = os.path.join(base_dir, label, today_date)
         next_ver = _scan_next_version(scan_dir, "v", 3)
         current  = next_ver - 1
@@ -210,6 +231,10 @@ class FolderIncrementerSet:
                 "prefix": ("STRING", {"default": "v"}),
                 "padding": ("INT", {"default": 3, "min": 1, "max": 10}),
                 "base_path": ("STRING", {"default": ""}),
+                "date_format": (DATE_FORMAT_CHOICES, {
+                    "default": "MM-DD-YYYY",
+                    "tooltip": "Date format (must match what FolderIncrementer uses)",
+                }),
             },
         }
 
@@ -224,9 +249,11 @@ class FolderIncrementerSet:
         return float("NaN")
 
     def set_version(self, label="default", value=1, trigger=None,
-                    prefix="v", padding=3, base_path=""):
+                    prefix="v", padding=3, base_path="",
+                    date_format="MM-DD-YYYY"):
         base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
-        today_date = datetime.now().strftime("%m-%d-%Y")
+        fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
+        today_date = datetime.now().strftime(fmt)
         folder = os.path.join(base_dir, label, today_date)
         for i in range(1, value + 1):
             ver_dir = os.path.join(folder, f"{prefix}{str(i).zfill(padding)}")

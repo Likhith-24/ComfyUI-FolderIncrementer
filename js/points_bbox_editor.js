@@ -165,6 +165,13 @@ class PointsBBoxEditor {
             const hW = this.node.widgets?.find(w => w.name === "height");
             if (wW) wW.value = img.naturalWidth;
             if (hW) hW.value = img.naturalHeight;
+            // Adapt container height to image aspect ratio (clamped to sane bounds)
+            if (this._containerEl && img.naturalWidth > 0) {
+                const cw = this._containerEl.getBoundingClientRect().width || 512;
+                const aspectH = Math.round(cw * (img.naturalHeight / img.naturalWidth));
+                const clampedH = Math.max(280, Math.min(aspectH + TOOLBAR_H + 20, 720));
+                this._containerEl.style.height = `${clampedH}px`;
+            }
             if (this._containerEl) {
                 const r = this._containerEl.getBoundingClientRect();
                 if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
@@ -536,6 +543,38 @@ app.registerExtension({
         const editor = new PointsBBoxEditor(node);
         editor.saveState();
 
+        // ── Create DOM widget ────────────────────────────────────────
+        const container = document.createElement("div");
+        container.style.cssText = "width:100%;min-height:280px;height:clamp(320px, 50vh, 640px);position:relative;overflow:hidden;cursor:crosshair;border-radius:6px;border:1px solid #313244;box-sizing:border-box;background:#181825;";
+        editor._containerEl = container;
+
+        const canvas = document.createElement("canvas");
+        canvas.style.cssText = "width:100%;height:100%;display:block;";
+        container.appendChild(canvas);
+
+        node.addDOMWidget("points_editor_canvas", "canvas", container, { serialize: false });
+        const ctx = canvas.getContext("2d");
+
+        // ── Render & Resize (defined early so callbacks can reference) ─
+        function render() {
+            const rect = container.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            ctx.clearRect(0, 0, rect.width, rect.height);
+            editor.draw(ctx, 0, 0, rect.width, rect.height);
+        }
+        function resize() {
+            const rect = container.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width  = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            render();
+        }
+        const ro = new ResizeObserver(() => resize());
+        ro.observe(container);
+        setTimeout(resize, 150);
+
         // ── Sync canvas dimensions from widget values ────────────────
         function syncCanvasSize() {
             const wW = node.widgets?.find(w => w.name === "width");
@@ -550,41 +589,10 @@ app.registerExtension({
                 wid.callback = function(v) {
                     origCb?.call(this, v);
                     syncCanvasSize();
-                    if (typeof render === "function") render();
+                    render();
                 };
             }
         }
-
-        // ── Create DOM widget ────────────────────────────────────────
-        const container = document.createElement("div");
-        container.style.cssText = "width:100%;height:380px;position:relative;overflow:hidden;cursor:crosshair;border-radius:6px;border:1px solid #313244;box-sizing:border-box;background:#181825;";
-        editor._containerEl = container;
-
-        const canvas = document.createElement("canvas");
-        canvas.style.cssText = "width:100%;height:100%;display:block;";
-        container.appendChild(canvas);
-
-        node.addDOMWidget("points_editor_canvas", "canvas", container, { serialize: false });
-        const ctx = canvas.getContext("2d");
-
-        // ── Resize ───────────────────────────────────────────────────
-        function resize() {
-            const rect = container.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return;
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width  = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            render();
-        }
-        function render() {
-            const rect = container.getBoundingClientRect();
-            ctx.clearRect(0, 0, rect.width, rect.height);
-            editor.draw(ctx, 0, 0, rect.width, rect.height);
-        }
-        const ro = new ResizeObserver(() => resize());
-        ro.observe(container);
-        setTimeout(resize, 150);
 
         // ── Try to load reference image ──────────────────────────────
         function tryLoadRefImage() {

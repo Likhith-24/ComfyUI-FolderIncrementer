@@ -9,11 +9,14 @@ import numpy as np
 import json
 import gc
 
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
+from .utils import (
+    HAS_CV2,
+    get_sam_predictor,
+    augment_prompts_from_mask,
+    mask_to_sam_logits,
+    parse_points_json,
+    parse_bbox_input,
+)
 
 
 class SAMMaskGeneratorMEC:
@@ -127,42 +130,20 @@ class SAMMaskGeneratorMEC:
         img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
         H, W = img_np.shape[:2]
 
-        # Parse points
-        try:
-            points_list = json.loads(points_json) if isinstance(points_json, str) else points_json
-        except json.JSONDecodeError:
-            points_list = []
-
-        point_coords = None
-        point_labels = None
+        # Parse points (shared utility)
+        points_list = parse_points_json(points_json)
+        point_coords, point_labels = None, None
         if points_list:
             coords = [[float(p["x"]), float(p["y"])] for p in points_list]
             labels = [int(p.get("label", 1)) for p in points_list]
             point_coords = np.array(coords, dtype=np.float32)
             point_labels = np.array(labels, dtype=np.int32)
 
-        # Parse bbox
-        box_np = None
-        if bbox_input is not None:
-            # From BBOX node: [x, y, w, h] → [x1, y1, x2, y2]
-            bx, by, bw, bh = bbox_input
-            box_np = np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
-        elif bbox_json and bbox_json.strip():
-            try:
-                bdata = json.loads(bbox_json)
-                if isinstance(bdata, list) and len(bdata) == 4:
-                    box_np = np.array(bdata, dtype=np.float32)
-                elif isinstance(bdata, dict):
-                    bx = float(bdata.get("x", 0))
-                    by = float(bdata.get("y", 0))
-                    bw = float(bdata.get("w", bdata.get("width", 0)))
-                    bh = float(bdata.get("h", bdata.get("height", 0)))
-                    box_np = np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
-            except json.JSONDecodeError:
-                pass
+        # Parse bbox (shared utility)
+        box_np = parse_bbox_input(bbox_json, bbox_input)
 
-        # ── Build predictor ────────────────────────────────────────────
-        predictor = self._get_predictor(model, model_type, img_np)
+        # ── Build predictor (shared utility) ───────────────────────────
+        predictor = get_sam_predictor(model, model_type, img_np)
 
         if predictor is None:
             empty = torch.zeros(1, H, W, dtype=torch.float32)
@@ -188,17 +169,17 @@ class SAMMaskGeneratorMEC:
             iter_labels = point_labels
             iter_box = box_np
 
-            # Augment prompts from previous iteration
+            # Augment prompts from previous iteration (shared utility)
             if iteration > 0 and current_mask is not None:
-                iter_coords, iter_labels, iter_box = self._augment_prompts(
+                iter_coords, iter_labels, iter_box = augment_prompts_from_mask(
                     current_mask, point_coords, point_labels, box_np,
-                    auto_negative_points, H, W,
+                    H, W, auto_negative=auto_negative_points,
                 )
 
             # Prepare mask input (logits from previous pass)
             mask_input = None
             if iteration > 0 and current_mask is not None:
-                mask_input = self._mask_to_logits(current_mask)
+                mask_input = mask_to_sam_logits(current_mask)
 
             # Run SAM
             try:
@@ -295,107 +276,6 @@ class SAMMaskGeneratorMEC:
         }, indent=2)
 
         return (selected_mask, all_masks_t, det_bbox, selected_score, info)
-
-    # ── Predictor factory ─────────────────────────────────────────────
-
-    def _get_predictor(self, model, model_type, img_np):
-        """Get the correct predictor for the model type and set image."""
-        predictor = None
-
-        if model_type in ("sam2", "sam2.1"):
-            try:
-                from sam2.sam2_image_predictor import SAM2ImagePredictor
-                predictor = SAM2ImagePredictor(model)
-            except Exception:
-                pass
-
-        elif model_type == "sam3":
-            try:
-                from sam3.predictor import SAM3Predictor
-                predictor = SAM3Predictor(model)
-            except Exception:
-                pass
-
-        else:
-            try:
-                from segment_anything import SamPredictor
-                predictor = SamPredictor(model)
-            except Exception:
-                pass
-
-        if predictor is not None:
-            try:
-                predictor.set_image(img_np)
-            except Exception:
-                return None
-
-        return predictor
-
-    # ── Iterative prompt augmentation ─────────────────────────────────
-
-    def _augment_prompts(self, mask, orig_coords, orig_labels, orig_box,
-                          auto_neg, H, W):
-        """Generate augmented prompts from the previous mask pass."""
-        coords_list = []
-        labels_list = []
-
-        if orig_coords is not None:
-            coords_list.append(orig_coords)
-            labels_list.append(orig_labels)
-
-        if not HAS_CV2:
-            c = np.concatenate(coords_list) if coords_list else None
-            l = np.concatenate(labels_list) if labels_list else None
-            return c, l, orig_box
-
-        binary = (mask > 0.5).astype(np.uint8)
-
-        # Interior positive points
-        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        interior = cv2.erode(binary, kern, iterations=1)
-        pts = np.argwhere(interior > 0)
-        if len(pts) > 0:
-            n = min(3, len(pts))
-            idx = np.linspace(0, len(pts) - 1, n, dtype=int)
-            coords_list.append(pts[idx][:, ::-1].astype(np.float32))
-            labels_list.append(np.ones(n, dtype=np.int32))
-
-        # Exterior negative points
-        if auto_neg:
-            dilated = cv2.dilate(binary, kern, iterations=1)
-            exterior = dilated - binary
-            pts = np.argwhere(exterior > 0)
-            if len(pts) > 0:
-                n = min(2, len(pts))
-                idx = np.linspace(0, len(pts) - 1, n, dtype=int)
-                coords_list.append(pts[idx][:, ::-1].astype(np.float32))
-                labels_list.append(np.zeros(n, dtype=np.int32))
-
-        all_coords = np.concatenate(coords_list).astype(np.float32) if coords_list else None
-        all_labels = np.concatenate(labels_list).astype(np.int32) if labels_list else None
-
-        # Derive tighter bbox
-        ys, xs = np.where(binary > 0)
-        if len(xs) > 0:
-            pad = max(5, int(min(H, W) * 0.02))
-            box = np.array([
-                max(0, xs.min() - pad), max(0, ys.min() - pad),
-                min(W, xs.max() + pad), min(H, ys.max() + pad),
-            ], dtype=np.float32)
-        else:
-            box = orig_box
-
-        return all_coords, all_labels, box
-
-    @staticmethod
-    def _mask_to_logits(mask, target_size=256):
-        """Convert float mask → SAM logit space (inverse sigmoid) at 256x256."""
-        m = np.clip(mask, 1e-6, 1 - 1e-6)
-        logits = np.log(m / (1 - m))
-        if HAS_CV2:
-            logits = cv2.resize(logits, (target_size, target_size),
-                                 interpolation=cv2.INTER_LINEAR)
-        return logits[np.newaxis, :, :]  # (1, 256, 256)
 
     @staticmethod
     def _fallback_predict(model, img_np, point_coords, point_labels, box_np, multimask):

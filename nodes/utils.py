@@ -460,10 +460,19 @@ def refine_with_vitmatte(img_t, mask_t, edge_radius, trimap_input=None):
         with torch.no_grad():
             alpha = model(**inputs).alphas[0, 0]
 
+        # Resize alpha to match mask if ViTMatte output resolution differs
+        alpha_out = alpha.cpu().to(mask_t.device)
+        mH, mW = mask_t.shape
+        if alpha_out.shape[0] != mH or alpha_out.shape[1] != mW:
+            alpha_out = F.interpolate(
+                alpha_out.unsqueeze(0).unsqueeze(0), size=(mH, mW),
+                mode="bilinear", align_corners=False,
+            ).squeeze(0).squeeze(0)
+
         # Blend: keep coarse mask in non-edge regions, ViTMatte at edges
         edge_band = compute_edge_band_np(mask_np, edge_radius)
         edge_band_t = torch.from_numpy(edge_band).to(mask_t.device)
-        result = mask_t * (1 - edge_band_t) + alpha.cpu().to(mask_t.device) * edge_band_t
+        result = mask_t * (1 - edge_band_t) + alpha_out * edge_band_t
 
         return result
 
@@ -542,6 +551,163 @@ def get_sam_predictor(model, model_type, img_np):
             return None
 
     return predictor
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Prompt Augmentation (for iterative SAM refinement)
+# ══════════════════════════════════════════════════════════════════════
+
+def augment_prompts_from_mask(mask, orig_coords, orig_labels, orig_box,
+                              H, W, auto_negative=True):
+    """Generate augmented prompts from a previous mask iteration.
+
+    Args:
+        mask: float32 numpy array (H, W) current mask
+        orig_coords: (N, 2) float32 array or None — original point coords
+        orig_labels: (N,) int32 array or None — original point labels
+        orig_box: (4,) float32 array or None — original bounding box [x1,y1,x2,y2]
+        H, W: image dimensions
+        auto_negative: whether to sample negative points from boundary exterior
+
+    Returns:
+        (all_coords, all_labels, box) tuple
+    """
+    coords_list = []
+    labels_list = []
+
+    if orig_coords is not None:
+        coords_list.append(orig_coords)
+        labels_list.append(orig_labels)
+
+    if not HAS_CV2:
+        c = np.concatenate(coords_list) if coords_list else None
+        l = np.concatenate(labels_list) if labels_list else None
+        return c, l, orig_box
+
+    import cv2
+    binary = (mask > 0.5).astype(np.uint8)
+
+    # Eroded interior → strong positive points
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    interior = cv2.erode(binary, kern, iterations=1)
+    interior_pts = np.argwhere(interior > 0)  # (y, x)
+    if len(interior_pts) > 0:
+        n = min(3, len(interior_pts))
+        indices = np.linspace(0, len(interior_pts) - 1, n, dtype=int)
+        sampled = interior_pts[indices]
+        coords_list.append(sampled[:, ::-1].astype(np.float32))
+        labels_list.append(np.ones(n, dtype=np.int32))
+
+    # Dilated boundary exterior → negative points
+    if auto_negative:
+        dilated = cv2.dilate(binary, kern, iterations=1)
+        exterior = dilated - binary
+        exterior_pts = np.argwhere(exterior > 0)
+        if len(exterior_pts) > 0:
+            n = min(2, len(exterior_pts))
+            indices = np.linspace(0, len(exterior_pts) - 1, n, dtype=int)
+            sampled = exterior_pts[indices]
+            coords_list.append(sampled[:, ::-1].astype(np.float32))
+            labels_list.append(np.zeros(n, dtype=np.int32))
+
+    all_coords = np.concatenate(coords_list).astype(np.float32) if coords_list else None
+    all_labels = np.concatenate(labels_list).astype(np.int32) if labels_list else None
+
+    # Derive tighter bbox from mask
+    ys, xs = np.where(binary > 0)
+    if len(xs) > 0:
+        pad = max(5, int(min(H, W) * 0.02))
+        box = np.array([
+            max(0, xs.min() - pad),
+            max(0, ys.min() - pad),
+            min(W, xs.max() + pad),
+            min(H, ys.max() + pad),
+        ], dtype=np.float32)
+    else:
+        box = orig_box
+
+    return all_coords, all_labels, box
+
+
+def mask_to_sam_logits(mask_np, target_size=256):
+    """Convert float mask → SAM logit space (inverse sigmoid) at target resolution.
+
+    Args:
+        mask_np: float32 numpy array (H, W) in [0, 1]
+        target_size: output spatial size (SAM expects 256)
+
+    Returns:
+        float32 numpy array (1, target_size, target_size)
+    """
+    m = np.clip(mask_np, 1e-6, 1 - 1e-6)
+    logits = np.log(m / (1 - m))
+    if HAS_CV2:
+        import cv2
+        logits = cv2.resize(logits, (target_size, target_size),
+                            interpolation=cv2.INTER_LINEAR)
+    return logits[np.newaxis, :, :]
+
+
+def parse_points_json(points_json):
+    """Parse points JSON string to a list of dicts.
+
+    Args:
+        points_json: JSON string or list
+
+    Returns:
+        list of dicts with 'x', 'y', 'label' keys
+    """
+    import json
+    try:
+        return json.loads(points_json) if isinstance(points_json, str) else points_json
+    except json.JSONDecodeError:
+        return []
+
+
+def points_to_arrays(points_list):
+    """Convert points list to numpy arrays for SAM.
+
+    Args:
+        points_list: list of dicts with 'x', 'y', 'label'
+
+    Returns:
+        (coords, labels) — numpy arrays or (None, None) if empty
+    """
+    if not points_list:
+        return None, None
+    coords = [[float(p["x"]), float(p["y"])] for p in points_list]
+    labels = [int(p.get("label", 1)) for p in points_list]
+    return np.array(coords, dtype=np.float32), np.array(labels, dtype=np.int32)
+
+
+def parse_bbox_input(bbox_json, bbox_input=None):
+    """Parse bounding box from JSON string or BBOX input.
+
+    Args:
+        bbox_json: JSON string like '[x1,y1,x2,y2]' or '{"x":..,"y":..,"w":..,"h":..}'
+        bbox_input: optional BBOX tuple [x, y, w, h]
+
+    Returns:
+        numpy array [x1, y1, x2, y2] or None
+    """
+    import json
+    if bbox_input is not None:
+        bx, by, bw, bh = bbox_input
+        return np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
+    if bbox_json and bbox_json.strip():
+        try:
+            bdata = json.loads(bbox_json)
+            if isinstance(bdata, list) and len(bdata) == 4:
+                return np.array(bdata, dtype=np.float32)
+            elif isinstance(bdata, dict):
+                bx = float(bdata.get("x", 0))
+                by = float(bdata.get("y", 0))
+                bw = float(bdata.get("w", bdata.get("width", 0)))
+                bh = float(bdata.get("h", bdata.get("height", 0)))
+                return np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════

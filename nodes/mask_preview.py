@@ -97,8 +97,8 @@ class MaskPreviewOverlay:
                 overlay = color.view(1, 1, 3).expand(H, W, 3)
                 frame = frame * (1 - edge_3d) + overlay * edge_3d
 
-            # Edge overlay for non-edge modes
-            if display_mode != "edge_highlight" and edge_width > 0:
+            # Edge overlay for non-edge modes (skip side_by_side — frame width differs)
+            if display_mode not in ("edge_highlight", "side_by_side") and edge_width > 0:
                 edge = self._detect_edge(mi, edge_width)
                 edge_3d = edge.unsqueeze(-1)
                 overlay_edge = color.view(1, 1, 3).expand(H, W, 3)

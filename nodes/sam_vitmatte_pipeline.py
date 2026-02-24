@@ -36,6 +36,11 @@ from .utils import (
     remove_small_regions,
     mask_to_bbox,
     make_split_preview,
+    augment_prompts_from_mask,
+    mask_to_sam_logits,
+    parse_points_json,
+    points_to_arrays,
+    parse_bbox_input,
 )
 
 try:
@@ -147,9 +152,9 @@ class SAMViTMattePipelineMEC:
         img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
         H, W = img_np.shape[:2]
 
-        # Parse prompts
-        points_list = self._parse_points(points_json)
-        box_np = self._parse_bbox(bbox_json, bbox)
+        # Parse prompts (shared utilities)
+        points_list = parse_points_json(points_json)
+        box_np = parse_bbox_input(bbox_json, bbox)
 
         # ── Stage 1: SAM coarse mask (with iterative refinement) ──────
         if offload and hasattr(model, "to"):
@@ -194,7 +199,7 @@ class SAMViTMattePipelineMEC:
         # ── Outputs ───────────────────────────────────────────────────
         edge_mask = torch.abs(refined_mask - (coarse_mask > 0.5).float())
         det_bbox = mask_to_bbox(refined_mask, W, H)
-        preview = make_split_preview(img_tensor, refined_mask, coarse_mask)
+        preview = make_split_preview(img_tensor, coarse_mask, refined_mask)
 
         info = json.dumps({
             "model_type": model_type,
@@ -232,7 +237,7 @@ class SAMViTMattePipelineMEC:
         if predictor is None:
             return torch.zeros((H, W), dtype=torch.float32), 0.0
 
-        point_coords, point_labels = self._points_to_arrays(points_list)
+        point_coords, point_labels = points_to_arrays(points_list)
 
         # Use existing mask as starting point if provided
         current_mask = None
@@ -251,7 +256,7 @@ class SAMViTMattePipelineMEC:
             iter_box = box_np
 
             if iteration > 0 and current_mask is not None:
-                aug_coords, aug_labels, aug_box = self._augment_prompts_from_mask(
+                aug_coords, aug_labels, aug_box = augment_prompts_from_mask(
                     current_mask, point_coords, point_labels, box_np, H, W
                 )
                 iter_coords = aug_coords
@@ -263,14 +268,7 @@ class SAMViTMattePipelineMEC:
             try:
                 mask_input = None
                 if iteration > 0 and current_mask is not None:
-                    m_logit = np.clip(current_mask, 1e-6, 1 - 1e-6)
-                    m_logit = np.log(m_logit / (1 - m_logit))
-                    if HAS_CV2:
-                        mask_input = cv2.resize(m_logit, (256, 256),
-                                                 interpolation=cv2.INTER_LINEAR)
-                    else:
-                        mask_input = m_logit
-                    mask_input = mask_input[np.newaxis, :, :]  # (1, 256, 256)
+                    mask_input = mask_to_sam_logits(current_mask)
 
                 masks_np, scores, _ = predictor.predict(
                     point_coords=iter_coords,
@@ -309,63 +307,6 @@ class SAMViTMattePipelineMEC:
             current_mask = np.zeros((H, W), dtype=np.float32)
 
         return torch.from_numpy(current_mask), best_score
-
-    def _augment_prompts_from_mask(self, mask, orig_coords, orig_labels,
-                                    orig_box, H, W):
-        """Generate additional prompts from the previous mask iteration."""
-        coords_list = []
-        labels_list = []
-
-        if orig_coords is not None:
-            coords_list.append(orig_coords)
-            labels_list.append(orig_labels)
-
-        if not HAS_CV2:
-            c = np.concatenate(coords_list) if coords_list else None
-            l = np.concatenate(labels_list) if labels_list else None
-            return c, l, orig_box
-
-        binary = (mask > 0.5).astype(np.uint8)
-
-        # Eroded interior → strong positive points
-        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        interior = cv2.erode(binary, kern, iterations=1)
-        interior_pts = np.argwhere(interior > 0)  # (y, x)
-        if len(interior_pts) > 0:
-            n = min(3, len(interior_pts))
-            indices = np.linspace(0, len(interior_pts) - 1, n, dtype=int)
-            sampled = interior_pts[indices]
-            coords_list.append(sampled[:, ::-1].astype(np.float32))
-            labels_list.append(np.ones(n, dtype=np.int32))
-
-        # Dilated boundary exterior → negative points
-        dilated = cv2.dilate(binary, kern, iterations=1)
-        exterior = dilated - binary
-        exterior_pts = np.argwhere(exterior > 0)
-        if len(exterior_pts) > 0:
-            n = min(2, len(exterior_pts))
-            indices = np.linspace(0, len(exterior_pts) - 1, n, dtype=int)
-            sampled = exterior_pts[indices]
-            coords_list.append(sampled[:, ::-1].astype(np.float32))
-            labels_list.append(np.zeros(n, dtype=np.int32))
-
-        all_coords = np.concatenate(coords_list).astype(np.float32) if coords_list else None
-        all_labels = np.concatenate(labels_list).astype(np.int32) if labels_list else None
-
-        # Derive tighter bbox from mask
-        ys, xs = np.where(binary > 0)
-        if len(xs) > 0:
-            pad = max(5, int(min(H, W) * 0.02))
-            box = np.array([
-                max(0, xs.min() - pad),
-                max(0, ys.min() - pad),
-                min(W, xs.max() + pad),
-                min(H, ys.max() + pad),
-            ], dtype=np.float32)
-        else:
-            box = orig_box
-
-        return all_coords, all_labels, box
 
     # ══════════════════════════════════════════════════════════════════
     #  STAGE 3 – Edge-aware matting (delegates to utils)
@@ -456,42 +397,3 @@ class SAMViTMattePipelineMEC:
             return torch.from_numpy(np.clip(result, 0, 1).astype(np.float32))
         except Exception:
             return None
-
-    # ══════════════════════════════════════════════════════════════════
-    #  Prompt parsing
-    # ══════════════════════════════════════════════════════════════════
-
-    @staticmethod
-    def _parse_points(points_json):
-        try:
-            return json.loads(points_json) if isinstance(points_json, str) else points_json
-        except json.JSONDecodeError:
-            return []
-
-    @staticmethod
-    def _points_to_arrays(points_list):
-        if not points_list:
-            return None, None
-        coords = [[float(p["x"]), float(p["y"])] for p in points_list]
-        labels = [int(p.get("label", 1)) for p in points_list]
-        return np.array(coords, dtype=np.float32), np.array(labels, dtype=np.int32)
-
-    @staticmethod
-    def _parse_bbox(bbox_json, bbox_input):
-        if bbox_input is not None:
-            bx, by, bw, bh = bbox_input
-            return np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
-        if bbox_json and bbox_json.strip():
-            try:
-                bdata = json.loads(bbox_json)
-                if isinstance(bdata, list) and len(bdata) == 4:
-                    return np.array(bdata, dtype=np.float32)
-                elif isinstance(bdata, dict):
-                    bx = float(bdata.get("x", 0))
-                    by = float(bdata.get("y", 0))
-                    bw = float(bdata.get("w", bdata.get("width", 0)))
-                    bh = float(bdata.get("h", bdata.get("height", 0)))
-                    return np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
-            except json.JSONDecodeError:
-                pass
-        return None

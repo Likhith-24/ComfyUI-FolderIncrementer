@@ -97,9 +97,6 @@ class ViTMatteRefinerMEC:
                 "trimap_mask": ("MASK", {
                     "tooltip": "Optional trimap for ViTMatte (white=fg, black=bg, gray=unknown)",
                 }),
-                "vitmatte_model": ("SAM_MODEL", {
-                    "tooltip": "Optional pre-loaded ViTMatte model",
-                }),
             },
         }
 
@@ -115,7 +112,7 @@ class ViTMatteRefinerMEC:
 
     def refine(self, image, mask, method, edge_radius, edge_softness,
                erode_amount, detail_level, iterations=1,
-               edge_contrast_boost=1.0, trimap_mask=None, vitmatte_model=None):
+               edge_contrast_boost=1.0, trimap_mask=None):
 
         img = image[0]  # (H, W, C)
         H, W = img.shape[:2]
@@ -145,7 +142,7 @@ class ViTMatteRefinerMEC:
         refined = m
         for _ in range(iterations):
             refined = self._dispatch_refine(
-                method, img, refined, trimap_mask, vitmatte_model,
+                method, img, refined, trimap_mask,
                 edge_radius, edge_softness, detail_level,
             )
 
@@ -171,7 +168,7 @@ class ViTMatteRefinerMEC:
 
         return (refined.unsqueeze(0), edge_mask.unsqueeze(0), preview.unsqueeze(0))
 
-    def _dispatch_refine(self, method, img, m, trimap_mask, vitmatte_model,
+    def _dispatch_refine(self, method, img, m, trimap_mask,
                           edge_radius, edge_softness, detail_level):
         """Route to the chosen refinement method with automatic fallback."""
 

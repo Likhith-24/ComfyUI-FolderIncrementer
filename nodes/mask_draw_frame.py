@@ -63,6 +63,26 @@ class MaskDrawFrame:
         except json.JSONDecodeError:
             params = {}
 
+        # ── Normalise params: list → dict based on shape ──────────────
+        if isinstance(params, list):
+            if shape == "circle" and len(params) >= 3:
+                params = {"cx": params[0], "cy": params[1], "radius": params[2]}
+            elif shape == "rectangle" and len(params) >= 4:
+                params = {"x": params[0], "y": params[1], "w": params[2], "h": params[3]}
+            elif shape == "ellipse" and len(params) >= 4:
+                params = {"cx": params[0], "cy": params[1], "rx": params[2], "ry": params[3],
+                          "angle": params[4] if len(params) >= 5 else 0}
+            elif shape == "polygon":
+                # List of [x,y] pairs → dict with "points" key
+                params = {"points": params}
+            elif shape == "line" and len(params) >= 4:
+                params = {"x1": params[0], "y1": params[1], "x2": params[2], "y2": params[3],
+                          "thickness": params[4] if len(params) >= 5 else 3}
+            else:
+                params = {}
+        elif not isinstance(params, dict):
+            params = {}
+
         # Create drawing canvas
         canvas = torch.zeros(height, width, dtype=torch.float32)
 

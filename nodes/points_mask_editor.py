@@ -108,8 +108,9 @@ class PointsMaskEditor:
         pos_points = []
         neg_points = []
         for pt in points:
-            coord = {"x": int(round(float(pt.get("x", 0)))),
-                     "y": int(round(float(pt.get("y", 0))))}
+            # Keep float precision for sub-pixel accuracy
+            coord = {"x": round(float(pt.get("x", 0)), 2),
+                     "y": round(float(pt.get("y", 0)), 2)}
             if int(pt.get("label", 1)) == 1:
                 pos_points.append(coord)
             else:
@@ -183,21 +184,20 @@ class PointsMaskEditor:
         # ── Build outputs ──────────────────────────────────────────────
 
         # 1. positive_coords / negative_coords — STRING for Sam2Segmentation
-        #    Format: [{"x": int, "y": int}, ...]
-        #    IMPORTANT: output None (not '[]') when empty, so downstream
-        #    `if coordinates is not None:` checks work correctly.
-        positive_coords = json.dumps(pos_points) if pos_points else None
-        negative_coords = json.dumps(neg_points) if neg_points else None
+        #    Format: [{"x": num, "y": num}, ...]
+        #    Always output valid JSON string (never None) so downstream
+        #    json.loads() won't crash even if the wire is connected.
+        positive_coords = json.dumps(pos_points) if pos_points else "[]"
+        negative_coords = json.dumps(neg_points) if neg_points else "[]"
 
         # 2. bboxes — BBOX for Sam2Segmentation / SAM2.1 / SeC
-        #    Sam2Segmentation expects: for bbox_list in bboxes → for bbox in bbox_list
-        #    So we pass the list of bbox coordinate-lists directly.
-        #    IMPORTANT: pass None (not []) when empty, so the
-        #    `if bboxes is not None:` check in Sam2Segmentation is skipped.
-        bboxes_out = pos_bboxes if pos_bboxes else None
+        #    Sam2Segmentation iterates: for bbox_list in bboxes → for bbox in bbox_list
+        #    So outer list = batch dim, inner list = individual bboxes.
+        #    Pass None when empty so `if bboxes is not None:` skips properly.
+        bboxes_out = [pos_bboxes] if pos_bboxes else None
 
         # 3. neg_bboxes — BBOX for SAM3 negative bounding boxes
-        neg_bboxes_out = neg_bboxes if neg_bboxes else None
+        neg_bboxes_out = [neg_bboxes] if neg_bboxes else None
 
         # 4. points_json — STRING unified format for SAMMaskGeneratorMEC
         #    Format: [{x, y, label, radius}, ...]

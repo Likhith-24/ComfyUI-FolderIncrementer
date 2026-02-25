@@ -407,7 +407,7 @@ class PointsBBoxEditor {
             `zoom: ${(this.zoom * 100).toFixed(0)}%`,
         ];
         ctx.fillText(statusParts.join("  \u2502  "), x + 8, y + h - 6);
-        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=radius  Del=hovered";
+        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=zoom  Shift+Scroll=radius  Del=hovered";
         const helpW = ctx.measureText(helpText).width;
         ctx.fillStyle = "#585b70";
         ctx.fillText(helpText, x + w - helpW - 8, y + h - 6);
@@ -557,13 +557,13 @@ app.registerExtension({
 
         // ── Render & Resize (defined early so callbacks can reference) ─
         function render() {
-            const rect = container.getBoundingClientRect();
+            const rect = canvas.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) return;
             ctx.clearRect(0, 0, rect.width, rect.height);
             editor.draw(ctx, 0, 0, rect.width, rect.height);
         }
         function resize() {
-            const rect = container.getBoundingClientRect();
+            const rect = canvas.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) return;
             const dpr = window.devicePixelRatio || 1;
             canvas.width  = rect.width * dpr;
@@ -604,8 +604,10 @@ app.registerExtension({
                     const srcNode = app.graph.getNodeById(linkInfo.origin_id);
                     if (!srcNode) continue;
 
+                    // Strategy 1: Node has rendered images (post-execution)
                     if (srcNode.imgs?.length > 0) { editor.loadRefImage(srcNode.imgs[0].src); return; }
 
+                    // Strategy 2: LoadImage widget with filename
                     const imgW = srcNode.widgets?.find(w => w.name === "image");
                     if (imgW?.value) {
                         const parts = imgW.value.split("/");
@@ -615,23 +617,28 @@ app.registerExtension({
                         return;
                     }
 
-                    if (srcNode.inputs) {
-                        for (const upInp of srcNode.inputs) {
-                            if (upInp.link != null) {
-                                const upLink = app.graph.links[upInp.link];
-                                if (!upLink) continue;
-                                const upNode = app.graph.getNodeById(upLink.origin_id);
-                                if (!upNode) continue;
-                                if (upNode.imgs?.length > 0) { editor.loadRefImage(upNode.imgs[0].src); return; }
-                                const upImgW = upNode.widgets?.find(w => w.name === "image");
-                                if (upImgW?.value) {
-                                    const p2 = upImgW.value.split("/");
-                                    const sf = p2.length > 1 ? p2.slice(0, -1).join("/") : "";
-                                    const fn = p2[p2.length - 1];
-                                    editor.loadRefImage(`/view?filename=${encodeURIComponent(fn)}&subfolder=${encodeURIComponent(sf)}&type=input`);
-                                    return;
-                                }
+                    // Strategy 3: Walk upstream (2 levels) looking for images
+                    const visited = new Set([srcNode.id]);
+                    const queue = srcNode.inputs ? [...srcNode.inputs] : [];
+                    for (let depth = 0; depth < 2 && queue.length > 0; depth++) {
+                        const batch = queue.splice(0, queue.length);
+                        for (const upInp of batch) {
+                            if (upInp.link == null) continue;
+                            const upLink = app.graph.links[upInp.link];
+                            if (!upLink) continue;
+                            const upNode = app.graph.getNodeById(upLink.origin_id);
+                            if (!upNode || visited.has(upNode.id)) continue;
+                            visited.add(upNode.id);
+                            if (upNode.imgs?.length > 0) { editor.loadRefImage(upNode.imgs[0].src); return; }
+                            const upImgW = upNode.widgets?.find(w => w.name === "image");
+                            if (upImgW?.value) {
+                                const p2 = upImgW.value.split("/");
+                                const sf = p2.length > 1 ? p2.slice(0, -1).join("/") : "";
+                                const fn = p2[p2.length - 1];
+                                editor.loadRefImage(`/view?filename=${encodeURIComponent(fn)}&subfolder=${encodeURIComponent(sf)}&type=input`);
+                                return;
                             }
+                            if (upNode.inputs) queue.push(...upNode.inputs);
                         }
                     }
                 }
@@ -644,12 +651,24 @@ app.registerExtension({
             if (connected) { setTimeout(() => { tryLoadRefImage(); render(); }, 200); }
             else { editor._refLoaded = false; editor._refImage = null; editor._lastRefUrl = null; syncCanvasSize(); render(); }
         };
-        const _imgInterval = setInterval(() => {
-            if (!editor._refLoaded) tryLoadRefImage(); else clearInterval(_imgInterval);
-        }, 2000);
+        let _imgInterval = setInterval(() => {
+            if (editor._refLoaded) return;
+            tryLoadRefImage();
+        }, 1500);
+
+        // Clean up interval when node is removed
+        const origOnRemoved = node.onRemoved;
+        node.onRemoved = function() {
+            origOnRemoved?.apply(this, arguments);
+            if (_imgInterval) { clearInterval(_imgInterval); _imgInterval = null; }
+            ro.disconnect();
+        };
+
         const origExecuted = node.onExecuted;
         node.onExecuted = function(output) {
             origExecuted?.apply(this, arguments);
+            // Force re-check image after execution (upstream may now have rendered images)
+            editor._lastRefUrl = null;
             tryLoadRefImage(); render();
         };
 
@@ -768,17 +787,20 @@ app.registerExtension({
             e.preventDefault();
             const rect = canvas.getBoundingClientRect();
             if (e.clientY - rect.top < TOOLBAR_H) return;
-            if (e.ctrlKey) {
+
+            if (e.shiftKey) {
+                // Shift+scroll = adjust radius
+                editor.currentRadius += e.deltaY < 0 ? 0.5 : -0.5;
+                editor.currentRadius = Math.max(0.5, Math.min(editor.currentRadius, 256));
+            } else {
+                // Plain scroll = zoom (centered on cursor, Nuke-style)
                 const factor = e.deltaY < 0 ? 1.12 : 0.89;
                 const mx = e.clientX - rect.left;
                 const my = e.clientY - rect.top - TOOLBAR_H;
                 editor.panX = mx - (mx - editor.panX) * factor;
                 editor.panY = my - (my - editor.panY) * factor;
                 editor.zoom *= factor;
-                editor.zoom = Math.max(0.1, Math.min(editor.zoom, 20));
-            } else {
-                editor.currentRadius += e.deltaY < 0 ? 0.5 : -0.5;
-                editor.currentRadius = Math.max(0.5, Math.min(editor.currentRadius, 256));
+                editor.zoom = Math.max(0.05, Math.min(editor.zoom, 30));
             }
             render();
         }, { passive: false });

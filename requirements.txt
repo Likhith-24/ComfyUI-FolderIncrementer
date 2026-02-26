@@ -7,6 +7,10 @@
 opencv-python>=4.7.0
 scipy>=1.10.0
 
+# SAM2/2.1 model support (install from GitHub if pip install SAM-2 fails)
+# pip install git+https://github.com/facebookresearch/sam2.git
+safetensors>=0.4.0
+
 # Optional – ViTMatte neural matting (auto-downloads model from HuggingFace)
 # Uncomment if you want the best edge refinement:
 # transformers>=4.30.0

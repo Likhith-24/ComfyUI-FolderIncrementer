@@ -12,6 +12,7 @@ import gc
 from .utils import (
     HAS_CV2,
     get_sam_predictor,
+    sam_predict,
     augment_prompts_from_mask,
     mask_to_sam_logits,
     parse_points_json,
@@ -104,7 +105,7 @@ class SAMMaskGeneratorMEC:
 
         try:
             result = self._run_inference(
-                model, model_type, image, points_json, bbox_json, bbox,
+                model, model_type, model_info, image, points_json, bbox_json, bbox,
                 multimask_output, mask_index, score_threshold,
                 apply_bbox_crop, target_device, model_dtype,
                 refine_iterations, auto_negative_points, existing_mask,
@@ -119,7 +120,7 @@ class SAMMaskGeneratorMEC:
 
         return result
 
-    def _run_inference(self, model, model_type, image, points_json, bbox_json,
+    def _run_inference(self, model, model_type, model_info, image, points_json, bbox_json,
                        bbox_input, multimask_output, mask_index, score_threshold,
                        apply_bbox_crop, device, dtype,
                        refine_iterations=1, auto_negative_points=False,
@@ -183,7 +184,8 @@ class SAMMaskGeneratorMEC:
 
             # Run SAM
             try:
-                masks_np, scores, _ = predictor.predict(
+                masks_np, scores, _ = sam_predict(
+                    predictor, model_info,
                     point_coords=iter_coords,
                     point_labels=iter_labels,
                     box=iter_box,
@@ -192,7 +194,8 @@ class SAMMaskGeneratorMEC:
                 )
             except TypeError:
                 # Predictor doesn't support mask_input
-                masks_np, scores, _ = predictor.predict(
+                masks_np, scores, _ = sam_predict(
+                    predictor, model_info,
                     point_coords=iter_coords,
                     point_labels=iter_labels,
                     box=iter_box,

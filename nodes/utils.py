@@ -510,7 +510,7 @@ def get_sam_predictor(model, model_type, img_np):
     """Create the correct SAM predictor for the given model type and set image.
 
     Args:
-        model: loaded SAM model object
+        model: loaded SAM model object (SAM2Base or SamModel)
         model_type: str ("sam2", "sam2.1", "sam3", "sam_vit_h", etc.)
         img_np: uint8 (H, W, 3) RGB image
 
@@ -518,39 +518,62 @@ def get_sam_predictor(model, model_type, img_np):
     """
     predictor = None
 
-    if model_type in ("sam2", "sam2.1"):
+    if model_type in ("sam2", "sam2.1", "sam3"):
         try:
             from sam2.sam2_image_predictor import SAM2ImagePredictor
             predictor = SAM2ImagePredictor(model)
         except ImportError:
-            pass
-
-    elif model_type == "sam3":
-        try:
-            # ComfyUI-SAM3 pattern: uses SAM2ImagePredictor with SAM3 model
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-            predictor = SAM2ImagePredictor(model)
-        except ImportError:
-            try:
-                from segment_anything import SamPredictor
-                predictor = SamPredictor(model)
-            except ImportError:
-                pass
-
+            logger.error(
+                "[MEC] sam2 package not found. Install with:\n"
+                "  pip install git+https://github.com/facebookresearch/sam2.git"
+            )
+            return None
     else:
         try:
             from segment_anything import SamPredictor
             predictor = SamPredictor(model)
         except ImportError:
-            pass
+            logger.error("[MEC] segment_anything package not found.")
+            return None
 
     if predictor is not None:
         try:
-            predictor.set_image(img_np)
-        except Exception:
+            # Detect dtype from model parameters (model.dtype may not exist)
+            dtype = None
+            device = "cpu"
+            if hasattr(model, 'parameters'):
+                try:
+                    p = next(model.parameters())
+                    dtype = p.dtype
+                    device = p.device
+                except StopIteration:
+                    pass
+            # Use autocast for fp16/bf16 models to avoid dtype mismatches
+            if dtype in (torch.float16, torch.bfloat16) and str(device) != "cpu":
+                with torch.autocast(str(device), dtype=dtype):
+                    predictor.set_image(img_np)
+            else:
+                predictor.set_image(img_np)
+        except Exception as e:
+            logger.error(f"[MEC] predictor.set_image failed: {e}")
             return None
 
     return predictor
+
+
+def sam_predict(predictor, model_info, **kwargs):
+    """Run ``predictor.predict()`` with proper autocast for fp16/bf16 models.
+
+    Wraps ``predict`` so callers don't need to manage dtype contexts.
+    All keyword arguments are forwarded to ``predictor.predict()``.
+    """
+    dtype = model_info.get("dtype", torch.float32) if isinstance(model_info, dict) else torch.float32
+    device = model_info.get("device", "cpu") if isinstance(model_info, dict) else "cpu"
+
+    if dtype in (torch.float16, torch.bfloat16) and str(device) != "cpu":
+        with torch.autocast(str(device), dtype=dtype):
+            return predictor.predict(**kwargs)
+    return predictor.predict(**kwargs)
 
 
 # ══════════════════════════════════════════════════════════════════════

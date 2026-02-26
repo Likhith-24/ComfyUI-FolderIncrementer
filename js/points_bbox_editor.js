@@ -165,13 +165,7 @@ class PointsBBoxEditor {
             const hW = this.node.widgets?.find(w => w.name === "height");
             if (wW) wW.value = img.naturalWidth;
             if (hW) hW.value = img.naturalHeight;
-            // Adapt container height to image aspect ratio (clamped to sane bounds)
-            if (this._containerEl && img.naturalWidth > 0) {
-                const cw = this._containerEl.getBoundingClientRect().width || 512;
-                const aspectH = Math.round(cw * (img.naturalHeight / img.naturalWidth));
-                const clampedH = Math.max(280, Math.min(aspectH + TOOLBAR_H + 20, 720));
-                this._containerEl.style.height = `${clampedH}px`;
-            }
+            // Fit view to current container size (don't resize container – that causes jumps)
             if (this._containerEl) {
                 const r = this._containerEl.getBoundingClientRect();
                 if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
@@ -545,18 +539,34 @@ app.registerExtension({
 
         // ── Create DOM widget ────────────────────────────────────────
         const container = document.createElement("div");
-        container.style.cssText = "width:100%;min-height:280px;height:clamp(320px, 50vh, 640px);position:relative;overflow:hidden;cursor:crosshair;border-radius:6px;border:1px solid #313244;box-sizing:border-box;background:#181825;";
+        container.style.cssText = "width:100%;height:420px;position:relative;overflow:hidden;cursor:crosshair;border-radius:6px;border:1px solid #313244;box-sizing:border-box;background:#181825;";
         editor._containerEl = container;
 
         const canvas = document.createElement("canvas");
         canvas.style.cssText = "width:100%;height:100%;display:block;";
         container.appendChild(canvas);
 
-        node.addDOMWidget("points_editor_canvas", "canvas", container, { serialize: false });
+        node.addDOMWidget("points_editor_canvas", "canvas", container, {
+            serialize: false,
+            getMinHeight() { return 320; },
+            getMaxHeight() { return 800; },
+        });
         const ctx = canvas.getContext("2d");
 
-        // ── Render & Resize (defined early so callbacks can reference) ─
+        // ── Render & Resize (debounced to prevent layout thrashing) ──
+        let _lastW = 0, _lastH = 0, _rafId = null;
         function render() {
+            if (_rafId) return; // already scheduled
+            _rafId = requestAnimationFrame(() => {
+                _rafId = null;
+                const rect = canvas.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return;
+                ctx.clearRect(0, 0, rect.width, rect.height);
+                editor.draw(ctx, 0, 0, rect.width, rect.height);
+            });
+        }
+        // Expose a synchronous render for cases that need immediate draw
+        function renderNow() {
             const rect = canvas.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) return;
             ctx.clearRect(0, 0, rect.width, rect.height);
@@ -565,15 +575,25 @@ app.registerExtension({
         function resize() {
             const rect = canvas.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) return;
+            const w = Math.round(rect.width);
+            const h = Math.round(rect.height);
+            // Skip if size unchanged (prevents reflow loops)
+            if (w === _lastW && h === _lastH) return;
+            _lastW = w; _lastH = h;
             const dpr = window.devicePixelRatio || 1;
-            canvas.width  = rect.width * dpr;
-            canvas.height = rect.height * dpr;
+            canvas.width  = w * dpr;
+            canvas.height = h * dpr;
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            render();
+            renderNow();
         }
-        const ro = new ResizeObserver(() => resize());
+        let _resizeTimer = null;
+        const ro = new ResizeObserver(() => {
+            // Debounce resize to prevent thrashing
+            if (_resizeTimer) clearTimeout(_resizeTimer);
+            _resizeTimer = setTimeout(resize, 50);
+        });
         ro.observe(container);
-        setTimeout(resize, 150);
+        setTimeout(resize, 200);
 
         // ── Sync canvas dimensions from widget values ────────────────
         function syncCanvasSize() {
@@ -731,6 +751,7 @@ app.registerExtension({
 
         // ── POINTER MOVE ─────────────────────────────────────────────
         canvas.addEventListener("pointermove", (e) => {
+            e.stopPropagation();
             const rect = canvas.getBoundingClientRect();
             const sx = e.clientX - rect.left;
             const sy = e.clientY - rect.top;
@@ -765,6 +786,7 @@ app.registerExtension({
 
         // ── POINTER UP ───────────────────────────────────────────────
         canvas.addEventListener("pointerup", (e) => {
+            e.stopPropagation();
             try { canvas.releasePointerCapture(e.pointerId); } catch(_) {}
             if (editor.isPanning) { editor.isPanning = false; canvas.style.cursor = "crosshair"; return; }
             if (editor.isBboxDrag && editor.dragStart && editor._dragEnd) {

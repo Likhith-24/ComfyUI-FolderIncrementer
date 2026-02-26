@@ -21,6 +21,7 @@ import gc
 from .utils import (
     HAS_CV2,
     get_sam_predictor,
+    sam_predict,
     refine_with_vitmatte,
     multi_scale_guided_refine,
     color_aware_refine,
@@ -162,7 +163,7 @@ class SAMViTMattePipelineMEC:
 
         try:
             coarse_mask, best_score = self._iterative_sam(
-                model, model_type, img_np, points_list, box_np,
+                model, model_type, model_info, img_np, points_list, box_np,
                 sam_iterations, multimask_output, mask_index,
                 score_threshold, target_device, model_dtype,
                 existing_mask, H, W,
@@ -227,7 +228,7 @@ class SAMViTMattePipelineMEC:
     #  STAGE 1 – Iterative SAM refinement
     # ══════════════════════════════════════════════════════════════════
 
-    def _iterative_sam(self, model, model_type, img_np, points_list,
+    def _iterative_sam(self, model, model_type, model_info, img_np, points_list,
                        box_np, iterations, multimask, mask_index,
                        score_threshold, device, dtype,
                        existing_mask, H, W):
@@ -270,7 +271,8 @@ class SAMViTMattePipelineMEC:
                 if iteration > 0 and current_mask is not None:
                     mask_input = mask_to_sam_logits(current_mask)
 
-                masks_np, scores, _ = predictor.predict(
+                masks_np, scores, _ = sam_predict(
+                    predictor, model_info,
                     point_coords=iter_coords,
                     point_labels=iter_labels,
                     box=iter_box,
@@ -278,7 +280,8 @@ class SAMViTMattePipelineMEC:
                     multimask_output=multimask,
                 )
             except TypeError:
-                masks_np, scores, _ = predictor.predict(
+                masks_np, scores, _ = sam_predict(
+                    predictor, model_info,
                     point_coords=iter_coords,
                     point_labels=iter_labels,
                     box=iter_box,

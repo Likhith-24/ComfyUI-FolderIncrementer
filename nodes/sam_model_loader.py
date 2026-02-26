@@ -2,9 +2,10 @@
 SAMModelLoaderMEC – Load SAM2/SAM2.1/SAM3 (or original SAM) checkpoints.
 
 Supports:
-  - SAM2 / SAM2.1 via sam2 package (kijai/ComfyUI-segment-anything-2 pattern)
-  - SAM3 via sam2 package (PozzettiAndrea/ComfyUI-SAM3 uses SAM2 infra)
+  - SAM2 / SAM2.1 via official sam2 package (pip install SAM-2)
+  - SAM3 via sam2 package (uses SAM2 infrastructure)
   - Original SAM (vit_h/l/b) via segment_anything package
+  - .safetensors / .pt / .pth checkpoint formats
   - Optional CPU-offload to save VRAM
   - Automatic model type detection from filename
   - Auto-download from HuggingFace Hub when model not found locally
@@ -24,16 +25,18 @@ except ImportError:
     HAS_FOLDER_PATHS = False
 
 
-# ── Known SAM2 config mapping (SAM2 requires a matching config) ───────
+# ── Official SAM2 config mapping for build_sam2 ──────────────────────
+# Keys match filename stems; values are config paths for the official
+# sam2 package (pip install SAM-2).
 SAM2_CONFIGS = {
-    "sam2_hiera_tiny":    "sam2_hiera_t.yaml",
-    "sam2_hiera_small":   "sam2_hiera_s.yaml",
-    "sam2_hiera_base":    "sam2_hiera_b+.yaml",
-    "sam2_hiera_large":   "sam2_hiera_l.yaml",
-    "sam2.1_hiera_tiny":  "sam2.1_hiera_t.yaml",
-    "sam2.1_hiera_small": "sam2.1_hiera_s.yaml",
-    "sam2.1_hiera_base":  "sam2.1_hiera_b+.yaml",
-    "sam2.1_hiera_large": "sam2.1_hiera_l.yaml",
+    "sam2_hiera_tiny":    "configs/sam2/sam2_hiera_t.yaml",
+    "sam2_hiera_small":   "configs/sam2/sam2_hiera_s.yaml",
+    "sam2_hiera_base":    "configs/sam2/sam2_hiera_b+.yaml",
+    "sam2_hiera_large":   "configs/sam2/sam2_hiera_l.yaml",
+    "sam2.1_hiera_tiny":  "configs/sam2.1/sam2.1_hiera_t.yaml",
+    "sam2.1_hiera_small": "configs/sam2.1/sam2.1_hiera_s.yaml",
+    "sam2.1_hiera_base":  "configs/sam2.1/sam2.1_hiera_b+.yaml",
+    "sam2.1_hiera_large": "configs/sam2.1/sam2.1_hiera_l.yaml",
 }
 
 # ── HuggingFace Hub auto-download registry ────────────────────────────
@@ -89,7 +92,11 @@ _DOWNLOAD_REGISTRY = {
 
 
 def _detect_config(model_name):
-    """Detect SAM2 config file from model filename."""
+    """Detect SAM2 config path from model filename.
+
+    Returns a config name suitable for the official sam2 ``build_sam2``
+    API (e.g. ``configs/sam2.1/sam2.1_hiera_t.yaml``).
+    """
     name = model_name.lower().replace("-", "_").replace(" ", "_")
     for key, config in SAM2_CONFIGS.items():
         normalized_key = key.replace(".", "").replace("_", "")
@@ -98,23 +105,23 @@ def _detect_config(model_name):
             return config
     # Heuristic fallback
     is_21 = "2.1" in name or "2_1" in name
+    prefix = "configs/sam2.1/sam2.1" if is_21 else "configs/sam2/sam2"
     if "tiny" in name or "_t." in name:
-        return "sam2.1_hiera_t.yaml" if is_21 else "sam2_hiera_t.yaml"
+        return f"{prefix}_hiera_t.yaml"
     if "small" in name or "_s." in name:
-        return "sam2.1_hiera_s.yaml" if is_21 else "sam2_hiera_s.yaml"
+        return f"{prefix}_hiera_s.yaml"
     if "base" in name or "_b+" in name or "_b." in name:
-        return "sam2.1_hiera_b+.yaml" if is_21 else "sam2_hiera_b+.yaml"
+        return f"{prefix}_hiera_b+.yaml"
     # Default to large
-    return "sam2.1_hiera_l.yaml" if is_21 else "sam2_hiera_l.yaml"
+    return f"{prefix}_hiera_l.yaml"
 
 
 class SAMModelLoaderMEC:
     """Load a Segment Anything Model (SAM / SAM2 / SAM2.1 / SAM3).
 
-    Loading patterns follow reference implementations:
-      - SAM2/2.1: kijai/ComfyUI-segment-anything-2 (build_sam2 with config)
-      - SAM3: PozzettiAndrea/ComfyUI-SAM3 (uses SAM2 infrastructure)
-      - Original SAM: segment_anything package
+    Uses the official ``sam2`` Python package (pip install SAM-2) for
+    SAM2/2.1/SAM3 models.  Falls back to ``segment_anything`` for
+    original SAM (ViT-H/L/B).
     """
 
     SUPPORTED_TYPES = [
@@ -269,7 +276,7 @@ class SAMModelLoaderMEC:
             clean_name = model_name[len("[download] "):]
             needs_download = True
 
-        # Try to find locally first
+        # Strategy 1: folder_paths registered keys
         if HAS_FOLDER_PATHS:
             for key in ("sams", "sam2", "sam3"):
                 if key in folder_paths.folder_names_and_paths:
@@ -280,14 +287,37 @@ class SAMModelLoaderMEC:
                     except Exception:
                         continue
 
-        # Auto-download from HuggingFace Hub if needed
-        if needs_download or not HAS_FOLDER_PATHS:
+        # Strategy 2: Direct filesystem scan of common model directories
+        if HAS_FOLDER_PATHS:
+            try:
+                models_dir = getattr(folder_paths, 'models_dir', None)
+                if not models_dir:
+                    models_dir = os.path.join(folder_paths.base_path, "models")
+                for subdir in ("sam2", "sams", "sam3"):
+                    candidate = os.path.join(models_dir, subdir, clean_name)
+                    if os.path.exists(candidate):
+                        return candidate
+            except Exception:
+                pass
+
+        # Strategy 3: Check if it's an absolute path that exists
+        if os.path.isabs(clean_name) and os.path.exists(clean_name):
+            return clean_name
+
+        # Auto-download from HuggingFace Hub if flagged
+        if needs_download:
             return SAMModelLoaderMEC._auto_download(clean_name)
 
-        # Not found locally and not marked for download
+        # Not found — give a helpful error
+        search_paths = []
+        if HAS_FOLDER_PATHS:
+            models_dir = getattr(folder_paths, 'models_dir',
+                                 os.path.join(getattr(folder_paths, 'base_path', ''), "models"))
+            search_paths = [os.path.join(models_dir, d) for d in ("sam2", "sams", "sam3")]
         raise FileNotFoundError(
-            f"SAM model '{clean_name}' not found. "
-            f"Place it in ComfyUI/models/sams/ or models/sam2/, "
+            f"SAM model '{clean_name}' not found.\n"
+            f"Searched: {', '.join(search_paths)}\n"
+            f"Place the model file in one of those directories, "
             f"or select a [download] model to auto-download from HuggingFace."
         )
 
@@ -373,42 +403,84 @@ class SAMModelLoaderMEC:
     # ── SAM2 / SAM2.1 / SAM3 ─────────────────────────────────────────
     def _load_sam2_family(self, model_path, model_name, model_type,
                           torch_dtype, device, offload):
-        """Load using sam2 package (covers SAM2, SAM2.1, and SAM3)."""
-        # Method 1: build_sam2 with config (correct pattern)
+        """Load SAM2/2.1/SAM3 model using the official sam2 package.
+
+        Strategy:
+          1. Load state_dict from any format (safetensors/pt/pth)
+          2. Build model architecture via ``build_sam2`` (no checkpoint)
+          3. Inject state_dict into the architecture
+          4. Create a proper SAM2Base model ready for SAM2ImagePredictor
+        """
+        config_name = _detect_config(model_name)
+
+        # ── Step 1: Load state_dict ────────────────────────────────────
+        state_dict = self._load_state_dict(model_path)
+
+        # ── Step 2: Build architecture + load weights ──────────────────
         try:
             from sam2.build_sam import build_sam2
-            config = _detect_config(model_name)
+
             model = build_sam2(
-                config_file=config,
-                ckpt_path=model_path,
+                config_file=config_name,
+                ckpt_path=None,      # architecture only
                 device="cpu",
             )
+
+            # Inject weights (strict=False tolerates minor key mismatches
+            # between different SAM2 revisions / fp16 conversions)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                logger.debug(f"[MEC] SAM2 missing keys: {len(missing)}")
+            if unexpected:
+                logger.debug(f"[MEC] SAM2 unexpected keys: {len(unexpected)}")
+
             model = model.to(torch_dtype)
             if not offload:
                 model = model.to(device)
+            model.eval()
             return model, "build_sam2"
-        except ImportError:
-            logger.debug("[MEC] sam2 package not available")
-        except Exception as e:
-            logger.debug(f"[MEC] build_sam2 failed: {e}")
 
-        # Method 2: direct state_dict load
+        except ImportError:
+            logger.error(
+                "[MEC] sam2 package not found. Install with:\n"
+                "  pip install git+https://github.com/facebookresearch/sam2.git"
+            )
+        except Exception as e:
+            logger.warning(f"[MEC] build_sam2 failed: {e}")
+
+        # ── Fallback: return state_dict wrapper ────────────────────────
+        logger.warning("[MEC] Returning raw state_dict — SAM2 inference may fail")
+        return {"state_dict": state_dict, "dtype": torch_dtype, "device": device}, "state_dict_only"
+
+    # ── State dict loader (safetensors / pt / pth) ────────────────────
+    @staticmethod
+    def _load_state_dict(model_path):
+        """Load state_dict from any supported checkpoint format."""
+
+        # safetensors (preferred — fast, safe)
+        if model_path.endswith(".safetensors"):
+            try:
+                from safetensors.torch import load_file
+                return load_file(model_path)
+            except ImportError:
+                pass
+
+        # comfy.utils (handles both safetensors and pt)
         try:
-            state = torch.load(model_path, map_location="cpu", weights_only=False)
-            if isinstance(state, dict):
-                if "model" in state:
-                    state = state["model"]
-                elif "state_dict" in state:
-                    state = state["state_dict"]
-            if hasattr(state, 'image_encoder'):
-                model = state.to(torch_dtype)
-                if not offload:
-                    model = model.to(device)
-                return model, "direct_model"
-        except Exception:
+            from comfy.utils import load_torch_file
+            sd = load_torch_file(model_path)
+            # Official checkpoints nest under "model" key
+            if isinstance(sd, dict) and "model" in sd and isinstance(sd["model"], dict):
+                sd = sd["model"]
+            return sd
+        except ImportError:
             pass
 
-        return None, "failed"
+        # torch.load fallback (pt/pth only)
+        sd = torch.load(model_path, map_location="cpu", weights_only=True)
+        if isinstance(sd, dict) and "model" in sd:
+            sd = sd["model"]
+        return sd
 
     # ── Original SAM ──────────────────────────────────────────────────
     @staticmethod
@@ -431,11 +503,14 @@ class SAMModelLoaderMEC:
     # ── Generic fallback ──────────────────────────────────────────────
     @staticmethod
     def _load_generic_fallback(model_path, torch_dtype, device, offload):
+        """Last-resort loader: return raw state_dict."""
         try:
-            state = torch.load(model_path, map_location="cpu", weights_only=False)
-            if isinstance(state, dict) and "model" in state:
-                state = state["model"]
+            sd = SAMModelLoaderMEC._load_state_dict(model_path)
             logger.warning("[MEC] Using generic state_dict loader — predictor may not work")
-            return {"state_dict": state, "dtype": torch_dtype, "device": device}, "generic"
+            return {"state_dict": sd, "dtype": torch_dtype, "device": device}, "generic"
         except Exception as e:
-            raise RuntimeError(f"Failed to load model: {e}")
+            raise RuntimeError(
+                f"Failed to load model '{model_path}': {e}\n"
+                f"If this is a .safetensors file, ensure 'safetensors' package is installed.\n"
+                f"For SAM2/2.1 models, install: pip install git+https://github.com/facebookresearch/sam2.git"
+            )

@@ -1,77 +1,96 @@
-# Architecture Review & Correction Plan
+# MaskEditControl – Implementation Plan (v2)
 
-## System Understanding
+## Architecture
 
-### Architecture
-- **Python backend**: `folder_incrementer.py` (3 nodes) + `nodes/*.py` (14 nodes)  
-- **JS frontend**: `js/folder_incrementer.js` (filename auto-extraction) + `js/points_bbox_editor.js` (canvas editor)  
-- **Registration**: `__init__.py` merges all NODE_CLASS_MAPPINGS  
-- **Deployment**: Dev copy at `D:\PROJECT\Custom_Nodes\` synced to `D:\PROJECT\ComfyUI_windows_portable\ComfyUI\custom_nodes\`
+### model_manager.py (NEW)
+- [x] `_MODEL_CACHE` dict keyed by `(model_type, variant, precision)`
+- [x] `MODEL_REGISTRY` with all SAM2/2.1/SAM3/SeC/VideoMaMa/ViTMatte/MatAnyone2
+- [x] `get_model_path()` – resolve local or trigger download
+- [x] `ensure_downloaded()` – HuggingFace Hub download
+- [x] `get_or_load_model()` – cache-aware model loading
+- [x] `clear_cache()` – free VRAM/RAM
+- [x] `precision_to_dtype()` – string → torch.dtype
+- [x] `scan_model_dir()` – list available checkpoints
 
-### Data Flow
-1. User uploads file (image/video) in ComfyUI → Load node has widget with filename
-2. JS `folder_incrementer.js` traverses graph upstream from trigger input → finds filename widget → writes to `source_filename` widget
-3. Python `FolderIncrementer.increment()` reads `source_filename` → derives folder_name, builds date folder, scans versions, creates version dir, returns paths
-4. Downstream Save nodes use `subfolder_path`/`filename_prefix` for output
+### UnifiedSegmentationNode (`nodes/unified_segmentation_node.py`) (NEW)
+- [x] Dispatcher pattern: `segment()` → `_run_sam2()` | `_run_sam3()` | `_run_sec()` | `_run_videomama()`
+- [x] `_parse_coords()` – JSON points → numpy arrays
+- [x] `_parse_bboxes()` – JSON/BBOX → numpy (pos + neg)
+- [x] `_validate_output()` – shape/clamp/batch normalization
+- [x] SAM2/2.1 image segmentation via SAM2ImagePredictor
+- [x] SAM2/2.1 video propagation via SAM2VideoPredictor (auto when B>1)
+- [x] SAM2.0 vs 2.1 bbox-in-video version check
+- [x] SAM3 image + video support (SAM2 architecture compatible)
+- [x] SeC stub with install instructions
+- [x] VideoMaMa stub with install instructions
+- [x] Autocast context for fp16/bf16 inference
 
-### PointsMaskEditor Flow
-1. User interacts with JS canvas (points_bbox_editor.js) → stores JSON in `editor_data` widget
-2. Python `PointsMaskEditor.generate()` parses JSON → outputs mask, coords, bboxes for SAM2
+### MattingNode (`nodes/matting_node.py`) (REWRITTEN)
+- [x] RETURN_TYPES = `("IMAGE", "MASK")`, RETURN_NAMES = `("rgb", "alpha_mask")`
+- [x] `_generate_trimap()` via dilate XOR erode (unknown = dilated & ~eroded)
+- [x] `_validate_alpha()` – shape/clamp/batch normalization
+- [x] VitMatte backend via `model_manager.get_or_load_model()`
+- [x] MatAnyone2 backend with proper warmup protocol (`first_frame_pred=True`)
+- [x] Auto mode (VitMatte for image, MatAnyone2 for video)
+- [x] RGB output: premultiplied (image × alpha)
 
----
+### PointsMaskEditor (`nodes/points_mask_editor.py`) (REFACTORED)
+- [x] `_parse_editor_data()` – JSON → separated pos/neg point/bbox lists
+- [x] `_render_point_brush()` – Gaussian/hard circle rendering
+- [x] `_render_bbox_region()` – positive fill / negative clear
+- [x] `_encode_reference_image()` – base64 JPEG for frontend
+- [x] Explicit named output variables
 
-## Issues Found
+### Registration (`__init__.py`) (UPDATED)
+- [x] Import `UnifiedSegmentationNode` from `unified_segmentation_node`
+- [x] Import `model_manager` module
+- [x] Print startup/loaded messages
+- [x] Updated mappings and display names
 
-### CRITICAL: FolderIncrementer creates folder on SCAN (not on save)
-- **Location**: `folder_incrementer.py` line 131-132
-- **Problem**: `os.makedirs(version_dir, exist_ok=True)` runs every time the node executes, even if no downstream save happens. If the workflow has this node connected but the save node fails or is disconnected, empty version folders accumulate.
-- **Also**: Because `IS_CHANGED` returns NaN, the node re-executes every queue, creating a new version folder each time — even if nothing downstream uses it.
-- **Impact**: Version numbers keep incrementing with empty folders.
-- **Correct behavior**: The node should ONLY scan and report paths. Folder creation is the responsibility of the Save node (which ComfyUI's Save Image node does automatically when given a subfolder path).
+### Tests (`tasks/test_nodes.py`) (NEW)
+- [x] Test 1: PointsMaskEditor output types
+- [x] Test 2: `_parse_editor_data`
+- [x] Test 3: `_render_point_brush`
+- [x] Test 4: `_render_bbox_region`
+- [x] Test 5: UnifiedSegmentationNode.INPUT_TYPES structure
+- [x] Test 6: `_parse_coords` / `_parse_bboxes`
+- [x] Test 7: `_validate_output` shape and clamping
+- [x] Test 8: MattingNode output types
+- [x] Test 9: `_generate_trimap` values (0/128/255)
+- [x] Test 10: `_validate_alpha` shape and clamping
 
-### CRITICAL: PointsMaskEditor outputs crash Sam2Segmentation
-- **Location**: `points_mask_editor.py` lines 192-200
-- **Problem**: When no bboxes are drawn, output is `None`. When no points are drawn, output is `None`. But Sam2Segmentation's `bboxes` input type is `BBOX` with `forceInput: True` implicit — if the output is connected, ComfyUI will still pass the value. The real crash happens because:
-  1. Empty list `[]` passes `if bboxes is not None:` check → loop body never sets `boxes_np` → UnboundLocalError
-  2. We already fixed this by outputting `None` instead of `[]` — VERIFIED this is current state.
-  3. BUT: When bboxes ARE provided, Sam2Segmentation iterates `for bbox_list in bboxes` where it expects bboxes to be a list of lists (batch of per-image bbox lists). Our output is `[[x1,y1,x2,y2]]` — a list containing one list of 4 ints. Sam2Seg iterates the outer list getting `[x1,y1,x2,y2]`, then iterates `for bbox in bbox_list` getting individual ints. `np.array([x1, y1, x2, y2])` produces shape `(4,)` which works for the non-individual_objects path.
-  4. Actually this works correctly for the non-batch case. The issue the user saw was the empty-list case, which is now fixed.
+## Existing Node Issues
+- [ ] FolderIncrementer premature dir creation (remove os.makedirs from node)
+- [x] PointsMaskEditor canvas shaking (fixed: unified height callbacks)
+- [x] PointsMaskEditor video frames (fixed: bg_image base64 return)
+- [x] PointsMaskEditor canvas resize on image change (fixed)
 
-### MODERATE: FolderIncrementer premature directory creation
-- **Problem**: Creating the version directory during node execution means every queue creates a folder even if the job fails downstream.
-- **Fix**: Remove `os.makedirs()` from the node. Let the Save node handle directory creation. ComfyUI's Save Image already creates `subfolder_path` automatically.
+## Model Registry Reference
 
-### MINOR: Coordinates output None breaks wire connections  
-- **Location**: `points_mask_editor.py` line 191
-- **Problem**: Outputting `None` for `positive_coords` when no points exist works for the `if coordinates_positive is not None:` check in Sam2Seg, BUT if the wire is connected, ComfyUI may raise an error because the output type is declared as STRING but actual value is None.
-- **Fix**: Output empty string `""` instead of `None` — Sam2Seg parses it with json.loads which will fail, caught by `except: pass`, and `coordinates_positive` remains the original string `""` which is truthy... Actually no. We need to trace this more carefully.
-
-### MINOR: Missing `render` reference in JS
-- The `render` function in `points_bbox_editor.js` is defined locally and referenced by the width/height callbacks but may not be accessible due to scoping (it's defined after those callbacks are set up). This could cause a silent failure.
-
----
-
-## Correction Strategy
-
-### Fix 1: Remove premature directory creation from FolderIncrementer
-- Remove `os.makedirs(version_dir, exist_ok=True)` 
-- The node outputs paths only; folder creation happens at the Save node level
-- This makes versioning deterministic and non-destructive
-
-### Fix 2: Fix PointsMaskEditor coordinate output format  
-- When no points: output `None` for coords (current) — this is correct because Sam2Seg checks `if coordinates_positive is not None:`
-- When no bboxes: output `None` for bboxes (current) — this is correct because Sam2Seg checks `if bboxes is not None:`
-- These outputs are optional connections; if not connected, Sam2Seg defaults to None anyway
-
-### Fix 3: Verify JS scoping for render function
-- Check that the `render` function is accessible in widget callbacks
-
----
+| Key | Family | HF Repo | Filename | Dir |
+|-----|--------|---------|----------|-----|
+| sam2_hiera_tiny | sam2 | Kijai/sam2-safetensors | sam2_hiera_tiny.safetensors | sam2 |
+| sam2_hiera_small | sam2 | Kijai/sam2-safetensors | sam2_hiera_small.safetensors | sam2 |
+| sam2_hiera_base_plus | sam2 | Kijai/sam2-safetensors | sam2_hiera_base_plus.safetensors | sam2 |
+| sam2_hiera_large | sam2 | Kijai/sam2-safetensors | sam2_hiera_large.safetensors | sam2 |
+| sam2.1_hiera_tiny | sam2 | Kijai/sam2-safetensors | sam2.1_hiera_tiny.safetensors | sam2 |
+| sam2.1_hiera_small | sam2 | Kijai/sam2-safetensors | sam2.1_hiera_small.safetensors | sam2 |
+| sam2.1_hiera_base_plus | sam2 | Kijai/sam2-safetensors | sam2.1_hiera_base_plus.safetensors | sam2 |
+| sam2.1_hiera_large | sam2 | Kijai/sam2-safetensors | sam2.1_hiera_large.safetensors | sam2 |
+| sam3 | sam3 | apozz/sam3-safetensors | sam3.safetensors | sam3 |
+| sec_4b | sec | OpenIXCLab/SeC-4B | — (sharded dir) | sams |
+| videomama | videomama | SammyLim/VideoMaMa | — (dir model) | VideoMaMa |
+| vitmatte_small | vitmatte | hustvl/vitmatte-small-distinctions-646 | — (HF Transformers) | vitmatte |
+| vitmatte_base | vitmatte | hustvl/vitmatte-base-distinctions-646 | — (HF Transformers) | vitmatte |
+| matanyone2 | matanyone2 | pq-yang/MatAnyone2 | matanyone2.pth | matanyone2 |
 
 ## Status
-- [x] Phase 1: Read entire codebase  
-- [x] Phase 2: Requirement matching  
-- [x] Phase 3: Issue detection  
-- [ ] Phase 4: Root cause analysis (detailed)  
-- [ ] Phase 5: Implement fixes  
-- [ ] Phase 6: Verification  
+- [x] Phase 1: Read codebase + all 7 third-party references
+- [x] Phase 2: Create model_manager.py (shared cache/download)
+- [x] Phase 3: Create unified_segmentation_node.py (dispatcher pattern)
+- [x] Phase 4: Rewrite matting_node.py (correct return types + trimap)
+- [x] Phase 5: Refactor points_mask_editor.py (private helpers)
+- [x] Phase 6: Create test_nodes.py (10 unit tests)
+- [x] Phase 7: Update __init__.py (new imports + print)
+- [x] Phase 8: Update todo.md
+- [ ] Phase 9: Run verification

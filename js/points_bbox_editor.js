@@ -12,8 +12,8 @@ import { app } from "../../scripts/app.js";
  *   Shift + click on bbox  → delete that bbox
  *   Delete / Backspace     → delete hovered element
  *   Middle-drag            → pan canvas
- *   Scroll                 → adjust point radius
- *   CTRL + Scroll          → zoom canvas
+ *   Scroll                 → adjust point radius (unchanged)
+ *   CTRL + Scroll          → zoom canvas (centered on cursor)
  *   CTRL + Z               → undo
  *   CTRL + Shift + Z / Y   → redo
  *   R                      → reset view (zoom & pan)
@@ -151,7 +151,7 @@ class PointsBBoxEditor {
     }
 
     // ── Load reference image ─────────────────────────────────────────
-    loadRefImage(imageUrl) {
+    loadRefImage(imageUrl, overrideWidth, overrideHeight) {
         if (!imageUrl || imageUrl === this._lastRefUrl) return;
         this._lastRefUrl = imageUrl;
         const img = new Image();
@@ -159,18 +159,23 @@ class PointsBBoxEditor {
         img.onload = () => {
             this._refImage  = img;
             this._refLoaded = true;
-            this._canvasW   = img.naturalWidth;
-            this._canvasH   = img.naturalHeight;
+            // Use override dimensions if provided (for downscaled previews from Python)
+            this._canvasW   = overrideWidth  || img.naturalWidth;
+            this._canvasH   = overrideHeight || img.naturalHeight;
             const wW = this.node.widgets?.find(w => w.name === "width");
             const hW = this.node.widgets?.find(w => w.name === "height");
-            if (wW) wW.value = img.naturalWidth;
-            if (hW) hW.value = img.naturalHeight;
-            // Fit view to current container size (don't resize container – that causes jumps)
-            if (this._containerEl) {
-                const r = this._containerEl.getBoundingClientRect();
-                if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
-            }
-            this.node._mecRender?.();
+            if (wW) wW.value = this._canvasW;
+            if (hW) hW.value = this._canvasH;
+            // Notify registration code to update widget/node sizing
+            this._onImageLoaded?.();
+            // Fit view after layout has settled from size change
+            setTimeout(() => {
+                if (this._containerEl) {
+                    const r = this._containerEl.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
+                }
+                this.node._mecRender?.();
+            }, 150);
         };
         img.onerror = () => console.warn("[MEC] Failed to load ref image:", imageUrl);
         img.src = imageUrl;
@@ -401,7 +406,7 @@ class PointsBBoxEditor {
             `zoom: ${(this.zoom * 100).toFixed(0)}%`,
         ];
         ctx.fillText(statusParts.join("  \u2502  "), x + 8, y + h - 6);
-        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=zoom  Shift+Scroll=radius  Del=hovered";
+        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=radius  Ctrl+Scroll=zoom  Del=hovered";
         const helpW = ctx.measureText(helpText).width;
         ctx.fillStyle = "#585b70";
         ctx.fillText(helpText, x + w - helpW - 8, y + h - 6);
@@ -538,8 +543,10 @@ app.registerExtension({
         editor.saveState();
 
         // ── Create DOM widget ────────────────────────────────────────
+        let _editorHeight = 450;
+
         const container = document.createElement("div");
-        container.style.cssText = "width:100%;height:420px;position:relative;overflow:hidden;cursor:crosshair;border-radius:6px;border:1px solid #313244;box-sizing:border-box;background:#181825;";
+        container.style.cssText = "width:100%;position:relative;overflow:hidden;cursor:crosshair;border-radius:6px;border:1px solid #313244;box-sizing:border-box;background:#181825;";
         editor._containerEl = container;
 
         const canvas = document.createElement("canvas");
@@ -548,52 +555,66 @@ app.registerExtension({
 
         node.addDOMWidget("points_editor_canvas", "canvas", container, {
             serialize: false,
-            getMinHeight() { return 320; },
-            getMaxHeight() { return 800; },
+            hideOnZoom: false,
+            getMinHeight: () => _editorHeight,
+            getMaxHeight: () => _editorHeight,
+            getHeight:    () => _editorHeight,
         });
         const ctx = canvas.getContext("2d");
 
-        // ── Render & Resize (debounced to prevent layout thrashing) ──
+        // ── Size update callback (called when reference image loads or dims change)
+        function updateEditorSize() {
+            const imgW = editor._canvasW;
+            const imgH = editor._canvasH;
+            if (imgW <= 0 || imgH <= 0) return;
+            const nodeW = node.size?.[0] || 500;
+            const availW = Math.max(200, nodeW - 40);
+            const scale  = Math.min(1.0, availW / imgW);
+            const displayH = Math.round(imgH * scale) + TOOLBAR_H + 24;
+            _editorHeight = Math.max(350, Math.min(displayH, 700));
+            const totalH = _editorHeight + 280;
+            node.setSize([Math.max(nodeW, Math.min(imgW + 40, 800)), totalH]);
+            if (node.graph) node.graph.setDirtyCanvas(true, true);
+        }
+        editor._onImageLoaded = updateEditorSize;
+
+        // ── Render & Resize (stable – prevents shaking) ─────────────
         let _lastW = 0, _lastH = 0, _rafId = null;
-        function render() {
-            if (_rafId) return; // already scheduled
-            _rafId = requestAnimationFrame(() => {
-                _rafId = null;
-                const rect = canvas.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) return;
-                ctx.clearRect(0, 0, rect.width, rect.height);
-                editor.draw(ctx, 0, 0, rect.width, rect.height);
-            });
-        }
-        // Expose a synchronous render for cases that need immediate draw
-        function renderNow() {
-            const rect = canvas.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return;
-            ctx.clearRect(0, 0, rect.width, rect.height);
-            editor.draw(ctx, 0, 0, rect.width, rect.height);
-        }
-        function resize() {
-            const rect = canvas.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return;
+
+        function ensureCanvasSize() {
+            const rect = container.getBoundingClientRect();
             const w = Math.round(rect.width);
             const h = Math.round(rect.height);
-            // Skip if size unchanged (prevents reflow loops)
-            if (w === _lastW && h === _lastH) return;
-            _lastW = w; _lastH = h;
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width  = w * dpr;
-            canvas.height = h * dpr;
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-            renderNow();
+            if (w === 0 || h === 0) return false;
+            if (w !== _lastW || h !== _lastH) {
+                _lastW = w; _lastH = h;
+                const dpr = window.devicePixelRatio || 1;
+                canvas.width  = w * dpr;
+                canvas.height = h * dpr;
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            }
+            return true;
         }
-        let _resizeTimer = null;
-        const ro = new ResizeObserver(() => {
-            // Debounce resize to prevent thrashing
-            if (_resizeTimer) clearTimeout(_resizeTimer);
-            _resizeTimer = setTimeout(resize, 50);
-        });
+
+        function render() {
+            if (_rafId) return;
+            _rafId = requestAnimationFrame(() => {
+                _rafId = null;
+                if (!ensureCanvasSize()) return;
+                ctx.clearRect(0, 0, _lastW, _lastH);
+                editor.draw(ctx, 0, 0, _lastW, _lastH);
+            });
+        }
+
+        function renderNow() {
+            if (!ensureCanvasSize()) return;
+            ctx.clearRect(0, 0, _lastW, _lastH);
+            editor.draw(ctx, 0, 0, _lastW, _lastH);
+        }
+
+        const ro = new ResizeObserver(() => render());
         ro.observe(container);
-        setTimeout(resize, 200);
+        setTimeout(render, 150);
 
         // ── Sync canvas dimensions from widget values ────────────────
         function syncCanvasSize() {
@@ -609,6 +630,7 @@ app.registerExtension({
                 wid.callback = function(v) {
                     origCb?.call(this, v);
                     syncCanvasSize();
+                    updateEditorSize();
                     render();
                 };
             }
@@ -687,7 +709,15 @@ app.registerExtension({
         const origExecuted = node.onExecuted;
         node.onExecuted = function(output) {
             origExecuted?.apply(this, arguments);
-            // Force re-check image after execution (upstream may now have rendered images)
+            // If Python sent a reference image (works for video frames and all image sources)
+            if (output?.bg_image?.[0]) {
+                const b64 = output.bg_image[0];
+                const origW = output.bg_image_width?.[0];
+                const origH = output.bg_image_height?.[0];
+                editor.loadRefImage("data:image/jpeg;base64," + b64, origW, origH);
+                return;
+            }
+            // Fallback: re-check upstream node images
             editor._lastRefUrl = null;
             tryLoadRefImage(); render();
         };
@@ -807,15 +837,12 @@ app.registerExtension({
         // ── SCROLL ───────────────────────────────────────────────────
         canvas.addEventListener("wheel", (e) => {
             e.preventDefault();
+            e.stopPropagation();
             const rect = canvas.getBoundingClientRect();
             if (e.clientY - rect.top < TOOLBAR_H) return;
 
-            if (e.shiftKey) {
-                // Shift+scroll = adjust radius
-                editor.currentRadius += e.deltaY < 0 ? 0.5 : -0.5;
-                editor.currentRadius = Math.max(0.5, Math.min(editor.currentRadius, 256));
-            } else {
-                // Plain scroll = zoom (centered on cursor, Nuke-style)
+            if (e.ctrlKey || e.metaKey) {
+                // CTRL + Scroll = zoom (centered on cursor)
                 const factor = e.deltaY < 0 ? 1.12 : 0.89;
                 const mx = e.clientX - rect.left;
                 const my = e.clientY - rect.top - TOOLBAR_H;
@@ -823,6 +850,10 @@ app.registerExtension({
                 editor.panY = my - (my - editor.panY) * factor;
                 editor.zoom *= factor;
                 editor.zoom = Math.max(0.05, Math.min(editor.zoom, 30));
+            } else {
+                // Plain scroll = adjust point radius
+                editor.currentRadius += e.deltaY < 0 ? 0.5 : -0.5;
+                editor.currentRadius = Math.max(0.5, Math.min(editor.currentRadius, 256));
             }
             render();
         }, { passive: false });

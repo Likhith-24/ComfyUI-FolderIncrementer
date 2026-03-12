@@ -4,14 +4,20 @@ ComfyUI-CustomNodePacks
 A growing collection of custom nodes:
   - FolderIncrementer – auto-incrementing version strings
   - MaskEditControl  – pinpoint mask editing, SAM2/SAM3, per-axis erode/expand,
-                       point editing, bbox tools, video mask propagation
+                       point editing, bbox tools, video mask propagation,
+                       alpha matting (ViTMatte / MatAnyone2)
 """
+
+print("[MEC] Loading MaskEditControl node pack …")
 
 # ── FolderIncrementer nodes ────────────────────────────────────────────
 from .folder_incrementer import (
     NODE_CLASS_MAPPINGS as _FOLDER_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _FOLDER_DISPLAY,
 )
+
+# ── Model Manager (shared cache / download) ───────────────────────────
+from .nodes import model_manager as _model_manager  # noqa: F401
 
 # ── MaskEditControl nodes ─────────────────────────────────────────────
 from .nodes.mask_transform_xy import MaskTransformXY
@@ -29,6 +35,8 @@ from .nodes.vitmatte_refiner import ViTMatteRefinerMEC
 from .nodes.sam_vitmatte_pipeline import SAMViTMattePipelineMEC
 from .nodes.trimap_generator import TrimapGeneratorMEC
 from .nodes.video_frame_extractor import VideoFrameExtractorMEC
+from .nodes.unified_segmentation_node import UnifiedSegmentationNode
+from .nodes.matting_node import MattingNode
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -50,6 +58,8 @@ _MEC_MAPPINGS = {
     "SAMViTMattePipelineMEC": SAMViTMattePipelineMEC,
     "TrimapGeneratorMEC": TrimapGeneratorMEC,
     "VideoFrameExtractorMEC": VideoFrameExtractorMEC,
+    "UnifiedSegmentationNode": UnifiedSegmentationNode,
+    "MattingNode": MattingNode,
 }
 
 _MEC_DISPLAY = {
@@ -72,6 +82,8 @@ _MEC_DISPLAY = {
     "SAMViTMattePipelineMEC": "SAM + ViTMatte Pipeline (MEC)",
     "TrimapGeneratorMEC": "Trimap Generator (MEC)",
     "VideoFrameExtractorMEC": "Video Frame Extractor (MEC)",
+    "UnifiedSegmentationNode": "Unified Segmentation (MEC)",
+    "MattingNode": "Matting Node (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────
@@ -81,3 +93,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {**_FOLDER_DISPLAY, **_MEC_DISPLAY}
 WEB_DIRECTORY = "./js"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+print(f"[MEC] Loaded {len(_MEC_MAPPINGS)} MaskEditControl nodes.")

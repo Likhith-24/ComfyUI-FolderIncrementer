@@ -81,6 +81,7 @@ class PointsBBoxEditor {
         this._containerEl = null;
         this._canvasW   = 512;
         this._canvasH   = 512;
+        this._hasAutoFitted = false;  // only auto-fit once
 
         // Undo/redo
         this._undoStack = [];
@@ -157,8 +158,14 @@ class PointsBBoxEditor {
 
     // ── Load reference image ─────────────────────────────────────────
     loadRefImage(imageUrl, overrideWidth, overrideHeight) {
-        if (!imageUrl || imageUrl === this._lastRefUrl) return;
-        this._lastRefUrl = imageUrl;
+        if (!imageUrl) return;
+        // For data: URLs, compare by dimensions only (base64 content changes each execution)
+        const isDataUrl = imageUrl.startsWith("data:");
+        const sameUrl = isDataUrl
+            ? (this._refLoaded && this._canvasW === (overrideWidth || 0) && this._canvasH === (overrideHeight || 0))
+            : (imageUrl === this._lastRefUrl);
+        if (sameUrl && this._refLoaded) return;
+        this._lastRefUrl = isDataUrl ? "__data_url__" : imageUrl;
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
@@ -173,14 +180,19 @@ class PointsBBoxEditor {
             if (hW) hW.value = this._canvasH;
             // Notify registration code to update widget/node sizing
             this._onImageLoaded?.();
-            // Fit view after layout has settled from size change
-            setTimeout(() => {
-                if (this._containerEl) {
-                    const r = this._containerEl.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
-                }
+            // Only auto-fit on first image load — preserve user's zoom/pan after that
+            if (!this._hasAutoFitted) {
+                this._hasAutoFitted = true;
+                setTimeout(() => {
+                    if (this._containerEl) {
+                        const r = this._containerEl.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
+                    }
+                    this.node._mecRender?.();
+                }, 150);
+            } else {
                 this.node._mecRender?.();
-            }, 150);
+            }
         };
         img.onerror = () => console.warn("[MEC] Failed to load ref image:", imageUrl);
         img.src = imageUrl;
@@ -519,6 +531,7 @@ class PointsBBoxEditor {
                 if (this._containerEl) {
                     const r = this._containerEl.getBoundingClientRect();
                     if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
+                    this._hasAutoFitted = true;
                 }
                 break;
         }
@@ -710,8 +723,20 @@ app.registerExtension({
         const origConnChange = node.onConnectionsChange;
         node.onConnectionsChange = function(type, index, connected, link_info) {
             origConnChange?.apply(this, arguments);
-            if (connected) { setTimeout(() => { tryLoadRefImage(); render(); }, 200); }
-            else { editor._refLoaded = false; editor._refImage = null; editor._lastRefUrl = null; syncCanvasSize(); render(); }
+            if (connected) {
+                setTimeout(() => { tryLoadRefImage(); render(); }, 200);
+            } else {
+                // Only clear image when reference_image specifically is disconnected
+                const inp = node.inputs?.[index];
+                if (inp?.name === "reference_image") {
+                    editor._refLoaded = false;
+                    editor._refImage = null;
+                    editor._lastRefUrl = null;
+                    editor._hasAutoFitted = false;
+                    syncCanvasSize();
+                }
+                render();
+            }
         };
         let _imgInterval = setInterval(() => {
             if (editor._refLoaded) return;
@@ -737,8 +762,7 @@ app.registerExtension({
                 editor.loadRefImage("data:image/jpeg;base64," + b64, origW, origH);
                 return;
             }
-            // Fallback: re-check upstream node images
-            editor._lastRefUrl = null;
+            // Fallback: re-check upstream node images (always reloads data: URLs)
             tryLoadRefImage(); render();
         };
 

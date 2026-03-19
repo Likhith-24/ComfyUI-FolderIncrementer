@@ -193,7 +193,8 @@ class UnifiedSegmentationNode:
                     "multiline": True,
                     "tooltip": (
                         'JSON array: [{"x":100,"y":200,"label":1}, ...].\n'
-                        "label 1 = foreground, 0 = background."
+                        "label 1 = foreground, 0 = background.\n"
+                        "Used when positive_coords/negative_coords are not connected."
                     ),
                 }),
                 "bbox_json": ("STRING", {
@@ -218,19 +219,60 @@ class UnifiedSegmentationNode:
                 }),
             },
             "optional": {
+                "positive_coords": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": (
+                        'Positive points JSON: [{"x":100,"y":200}, ...].\n'
+                        "From Points Mask Editor positive_coords output."
+                    ),
+                }),
+                "negative_coords": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": (
+                        'Negative points JSON: [{"x":100,"y":200}, ...].\n'
+                        "From Points Mask Editor negative_coords output."
+                    ),
+                }),
                 "bbox": ("BBOX", {
-                    "tooltip": "Bounding box from upstream node (overrides bbox_json).",
+                    "tooltip": "Positive bounding box from upstream node (overrides bbox_json).",
                 }),
                 "neg_bbox_json": ("STRING", {
                     "default": "",
                     "tooltip": "Negative bounding box [x1,y1,x2,y2] — SAM3 exclusive.",
+                }),
+                "neg_bboxes": ("BBOX", {
+                    "tooltip": "Negative bounding boxes from Points Mask Editor.",
                 }),
                 "text_prompt": ("STRING", {
                     "default": "",
                     "tooltip": "Text description of target — SeC models only.",
                 }),
                 "existing_mask": ("MASK", {
-                    "tooltip": "Initial mask for refinement iterations.",
+                    "tooltip": "Initial mask for refinement or VideoMaMa input.",
+                }),
+                "keep_model_loaded": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Keep model in VRAM between executions (faster re-runs, uses more memory).",
+                }),
+                "tracking_direction": (["forward", "backward", "bidirectional"], {
+                    "default": "forward",
+                    "tooltip": (
+                        "Video propagation direction.\n"
+                        "forward: propagate from annotation frame onward.\n"
+                        "backward: propagate backward from annotation frame.\n"
+                        "bidirectional: both directions (SeC/SAM2)."
+                    ),
+                }),
+                "annotation_frame_idx": ("INT", {
+                    "default": 0, "min": 0, "max": 999999,
+                    "tooltip": "Frame index where points/bbox prompts are placed (0-based).",
+                }),
+                "individual_objects": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": (
+                        "Treat each positive point as a separate object for tracking.\n"
+                        "When True, each point gets its own object ID and masks are OR-combined."
+                    ),
                 }),
             },
         }
@@ -242,7 +284,8 @@ class UnifiedSegmentationNode:
     DESCRIPTION = (
         "Unified segmentation supporting SAM2/2.1, SAM3, SeC, and VideoMaMa.  "
         "Auto-detects image vs video mode from input batch size.  "
-        "Auto-downloads models from HuggingFace on first use."
+        "Accepts separate positive/negative points and bboxes from Points Mask Editor.  "
+        "Supports bidirectional tracking, per-frame annotation, and individual object mode."
     )
 
     # ══════════════════════════════════════════════════════════════════
@@ -258,10 +301,17 @@ class UnifiedSegmentationNode:
         multimask: bool,
         mask_index: int,
         precision: str,
+        positive_coords: str | None = None,
+        negative_coords: str | None = None,
         bbox=None,
         neg_bbox_json: str = "",
+        neg_bboxes=None,
         text_prompt: str = "",
         existing_mask: torch.Tensor | None = None,
+        keep_model_loaded: bool = True,
+        tracking_direction: str = "forward",
+        annotation_frame_idx: int = 0,
+        individual_objects: bool = False,
     ):
         clean = model_name.replace("[download] ", "")
         if clean not in MODEL_REGISTRY:
@@ -275,13 +325,23 @@ class UnifiedSegmentationNode:
 
         model = get_or_load_model(clean, precision=precision, device=device)
 
-        # Parse prompts
-        pt_coords, pt_labels = _parse_coords(points_json)
+        # ── Merge points from separate pos/neg inputs or combined JSON ──
+        if positive_coords or negative_coords:
+            merged = self._merge_pos_neg_coords(positive_coords, negative_coords)
+            pt_coords, pt_labels = _parse_coords(json.dumps(merged))
+        else:
+            pt_coords, pt_labels = _parse_coords(points_json)
+
+        # ── Parse bboxes ──
         pos_box, neg_box = _parse_bboxes(bbox_json, bbox, neg_bbox_json)
+        # Override neg_box from upstream BBOX if provided
+        if neg_bboxes is not None:
+            neg_box = parse_bbox_input("", neg_bboxes)
 
         B, H, W, _C = image.shape
         is_video = B > 1
         torch_dtype = precision_to_dtype(precision)
+        annotation_frame_idx = min(annotation_frame_idx, max(0, B - 1))
 
         # ── Dispatch by family ────────────────────────────────────────
         if family == "sam2":
@@ -289,17 +349,20 @@ class UnifiedSegmentationNode:
                 model, image, pt_coords, pt_labels, pos_box,
                 multimask, mask_index, torch_dtype, device,
                 B, H, W, is_video, reg,
+                tracking_direction, annotation_frame_idx, individual_objects,
             )
         elif family == "sam3":
             masks, score = self._run_sam3(
                 model, image, pt_coords, pt_labels, pos_box, neg_box,
                 multimask, mask_index, torch_dtype, device,
                 B, H, W, is_video,
+                tracking_direction, annotation_frame_idx, individual_objects,
             )
         elif family == "sec":
             masks, score = self._run_sec(
                 model, image, pt_coords, pt_labels, pos_box,
                 text_prompt, torch_dtype, device, B, H, W, is_video,
+                tracking_direction, annotation_frame_idx,
             )
         elif family == "videomama":
             masks, score = self._run_videomama(
@@ -311,6 +374,13 @@ class UnifiedSegmentationNode:
 
         masks = _validate_output(masks, B, H, W)
 
+        # Free VRAM if requested
+        if not keep_model_loaded:
+            clear_cache(clean)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+
         info = json.dumps({
             "model": clean,
             "family": family,
@@ -318,9 +388,37 @@ class UnifiedSegmentationNode:
             "frames": B,
             "best_score": round(score, 4),
             "precision": precision,
+            "tracking_direction": tracking_direction if is_video else "n/a",
+            "annotation_frame": annotation_frame_idx if is_video else 0,
+            "individual_objects": individual_objects,
         }, indent=2)
 
         return (masks, score, info)
+
+    # ── Helper: merge separate pos/neg coords into unified format ─────
+
+    @staticmethod
+    def _merge_pos_neg_coords(
+        positive_coords: str | None,
+        negative_coords: str | None,
+    ) -> list[dict]:
+        """Merge separate pos/neg coordinate strings into label-tagged list."""
+        merged = []
+        if positive_coords:
+            try:
+                pos = json.loads(positive_coords)
+                for p in pos:
+                    merged.append({"x": p["x"], "y": p["y"], "label": 1})
+            except (json.JSONDecodeError, KeyError):
+                pass
+        if negative_coords:
+            try:
+                neg = json.loads(negative_coords)
+                for p in neg:
+                    merged.append({"x": p["x"], "y": p["y"], "label": 0})
+            except (json.JSONDecodeError, KeyError):
+                pass
+        return merged
 
     # ══════════════════════════════════════════════════════════════════
     #  SAM2 / SAM2.1 Dispatcher
@@ -342,12 +440,16 @@ class UnifiedSegmentationNode:
         W: int,
         is_video: bool,
         reg: dict,
+        tracking_direction: str = "forward",
+        annotation_frame_idx: int = 0,
+        individual_objects: bool = False,
     ):
         """SAM2/2.1 segmentation — image or video mode."""
         if is_video:
             return self._sam2_video(
                 model, image, pt_coords, pt_labels, box_np,
                 dtype, device, B, H, W, reg,
+                tracking_direction, annotation_frame_idx, individual_objects,
             )
         else:
             return self._sam2_image(
@@ -393,11 +495,15 @@ class UnifiedSegmentationNode:
     def _sam2_video(
         self, model, frames, pt_coords, pt_labels, box_np,
         dtype, device, B, H, W, reg,
+        tracking_direction="forward", annotation_frame_idx=0,
+        individual_objects=False,
     ):
         """Video propagation with SAM2VideoPredictor.
 
-        Note: SAM2.0 does NOT support bbox in video mode.
-              SAM2.1 adds bbox support.
+        Supports:
+          - annotation_frame_idx: place prompts on any frame
+          - tracking_direction: forward, backward, bidirectional
+          - individual_objects: each positive point gets its own object ID
         """
         try:
             from sam2.sam2_video_predictor import SAM2VideoPredictor
@@ -405,7 +511,6 @@ class UnifiedSegmentationNode:
             raise RuntimeError("sam2 package is required for video propagation.")
 
         # Upgrade SAM2Base → SAM2VideoPredictor in-place (avoids reloading).
-        # SAM2VideoPredictor inherits from SAM2Base and only adds 4 attrs.
         if not isinstance(model, SAM2VideoPredictor):
             model.__class__ = SAM2VideoPredictor
             model.fill_hole_area = 8
@@ -413,6 +518,9 @@ class UnifiedSegmentationNode:
             model.clear_non_cond_mem_around_input = False
             model.add_all_frames_to_correct_as_cond = False
         video_pred = model
+
+        version = reg.get("version", "2.0")
+        annotation_frame_idx = min(annotation_frame_idx, B - 1)
 
         # Save frames to temp JPEG dir (required by init_state)
         tmp = tempfile.mkdtemp(prefix="mec_vid_")
@@ -428,25 +536,69 @@ class UnifiedSegmentationNode:
             with _autocast(dtype, device):
                 state = video_pred.init_state(video_path=tmp)
 
-            # Add prompts on frame 0
-            pkw: dict = {"inference_state": state, "frame_idx": 0, "obj_id": 1}
-            if pt_coords is not None:
-                pkw["points"] = pt_coords
-                pkw["labels"] = pt_labels
+            # ── Add prompts ───────────────────────────────────────────
+            if individual_objects and pt_coords is not None and len(pt_coords) > 1:
+                # Each positive point is a separate object
+                pos_mask = pt_labels == 1
+                neg_coords = pt_coords[~pos_mask] if (~pos_mask).any() else None
+                neg_labels = pt_labels[~pos_mask] if (~pos_mask).any() else None
 
-            # SAM2.1 supports bbox in video; SAM2.0 does not
-            version = reg.get("version", "2.0")
-            if box_np is not None and version != "2.0":
-                pkw["box"] = box_np
+                for obj_idx, pos_idx in enumerate(np.where(pos_mask)[0]):
+                    obj_id = obj_idx + 1
+                    if neg_coords is not None:
+                        coords = np.concatenate([pt_coords[pos_idx:pos_idx+1], neg_coords])
+                        labels = np.concatenate([pt_labels[pos_idx:pos_idx+1], neg_labels])
+                    else:
+                        coords = pt_coords[pos_idx:pos_idx+1]
+                        labels = pt_labels[pos_idx:pos_idx+1]
 
-            with _autocast(dtype, device):
-                video_pred.add_new_points_or_box(**pkw)
+                    pkw = {
+                        "inference_state": state,
+                        "frame_idx": annotation_frame_idx,
+                        "obj_id": obj_id,
+                        "points": coords,
+                        "labels": labels,
+                    }
+                    with _autocast(dtype, device):
+                        video_pred.add_new_points_or_box(**pkw)
+            else:
+                # Single object mode
+                pkw: dict = {
+                    "inference_state": state,
+                    "frame_idx": annotation_frame_idx,
+                    "obj_id": 1,
+                }
+                if pt_coords is not None:
+                    pkw["points"] = pt_coords
+                    pkw["labels"] = pt_labels
+                if box_np is not None and version != "2.0":
+                    pkw["box"] = box_np
+                with _autocast(dtype, device):
+                    video_pred.add_new_points_or_box(**pkw)
 
-            # Propagate
+            # ── Propagate ─────────────────────────────────────────────
             collected: dict[int, torch.Tensor] = {}
-            with _autocast(dtype, device):
-                for fidx, _oids, logits in video_pred.propagate_in_video(state):
-                    collected[fidx] = (logits[0, 0] > 0.0).float().cpu()
+
+            def _propagate(reverse=False):
+                with _autocast(dtype, device):
+                    for fidx, _oids, logits in video_pred.propagate_in_video(
+                        state, reverse=reverse
+                    ):
+                        combined = torch.zeros(H, W, dtype=torch.float32)
+                        for oid_idx in range(logits.shape[0]):
+                            mask = (logits[oid_idx, 0] > 0.0).float().cpu()
+                            if mask.shape[-2] != H or mask.shape[-1] != W:
+                                mask = F.interpolate(
+                                    mask.unsqueeze(0).unsqueeze(0),
+                                    size=(H, W), mode="bilinear", align_corners=False,
+                                ).squeeze(0).squeeze(0)
+                            combined = torch.maximum(combined, mask)
+                        collected[fidx] = combined
+
+            if tracking_direction in ("forward", "bidirectional"):
+                _propagate(reverse=False)
+            if tracking_direction in ("backward", "bidirectional"):
+                _propagate(reverse=True)
 
             out: list[torch.Tensor] = []
             for i in range(B):
@@ -476,6 +628,9 @@ class UnifiedSegmentationNode:
         H: int,
         W: int,
         is_video: bool,
+        tracking_direction: str = "forward",
+        annotation_frame_idx: int = 0,
+        individual_objects: bool = False,
     ):
         """SAM3 segmentation — image or video mode.
 
@@ -486,6 +641,7 @@ class UnifiedSegmentationNode:
             return self._sam3_video(
                 model, image, pt_coords, pt_labels, box_np, neg_box,
                 dtype, device, B, H, W,
+                tracking_direction, annotation_frame_idx, individual_objects,
             )
         else:
             return self._sam3_image(
@@ -535,18 +691,30 @@ class UnifiedSegmentationNode:
     def _sam3_video(
         self, model, frames, pt_coords, pt_labels, box_np, neg_box,
         dtype, device, B, H, W,
+        tracking_direction="forward", annotation_frame_idx=0,
+        individual_objects=False,
     ):
         """Video propagation for SAM3.
 
         Uses SAM2VideoPredictor under the hood since SAM3 architecture
-        is SAM2.1 compatible.
+        is SAM2.1 compatible.  Supports tracking_direction, annotation_frame_idx,
+        and individual_objects.
         """
         try:
             from sam2.sam2_video_predictor import SAM2VideoPredictor
         except ImportError:
             raise RuntimeError("sam2 package is required for SAM3 video propagation.")
 
-        video_pred = SAM2VideoPredictor(model)
+        # Upgrade in-place (same pattern as _sam2_video)
+        if not isinstance(model, SAM2VideoPredictor):
+            model.__class__ = SAM2VideoPredictor
+            model.fill_hole_area = 8
+            model.non_overlap_masks = False
+            model.clear_non_cond_mem_around_input = False
+            model.add_all_frames_to_correct_as_cond = False
+        video_pred = model
+
+        annotation_frame_idx = min(annotation_frame_idx, B - 1)
         tmp = tempfile.mkdtemp(prefix="mec_sam3v_")
         try:
             from PIL import Image as PILImage
@@ -560,20 +728,69 @@ class UnifiedSegmentationNode:
             with _autocast(dtype, device):
                 state = video_pred.init_state(video_path=tmp)
 
-            pkw: dict = {"inference_state": state, "frame_idx": 0, "obj_id": 1}
-            if pt_coords is not None:
-                pkw["points"] = pt_coords
-                pkw["labels"] = pt_labels
-            if box_np is not None:
-                pkw["box"] = box_np
+            # ── Add prompts ───────────────────────────────────────────
+            if individual_objects and pt_coords is not None and len(pt_coords) > 1:
+                pos_mask = pt_labels == 1
+                neg_coords = pt_coords[~pos_mask] if (~pos_mask).any() else None
+                neg_labels = pt_labels[~pos_mask] if (~pos_mask).any() else None
 
-            with _autocast(dtype, device):
-                video_pred.add_new_points_or_box(**pkw)
+                for obj_idx, pos_idx in enumerate(np.where(pos_mask)[0]):
+                    obj_id = obj_idx + 1
+                    if neg_coords is not None:
+                        coords = np.concatenate([pt_coords[pos_idx:pos_idx+1], neg_coords])
+                        labels = np.concatenate([pt_labels[pos_idx:pos_idx+1], neg_labels])
+                    else:
+                        coords = pt_coords[pos_idx:pos_idx+1]
+                        labels = pt_labels[pos_idx:pos_idx+1]
 
+                    pkw = {
+                        "inference_state": state,
+                        "frame_idx": annotation_frame_idx,
+                        "obj_id": obj_id,
+                        "points": coords,
+                        "labels": labels,
+                    }
+                    if box_np is not None:
+                        pkw["box"] = box_np
+                    with _autocast(dtype, device):
+                        video_pred.add_new_points_or_box(**pkw)
+            else:
+                pkw: dict = {
+                    "inference_state": state,
+                    "frame_idx": annotation_frame_idx,
+                    "obj_id": 1,
+                }
+                if pt_coords is not None:
+                    pkw["points"] = pt_coords
+                    pkw["labels"] = pt_labels
+                if box_np is not None:
+                    pkw["box"] = box_np
+                with _autocast(dtype, device):
+                    video_pred.add_new_points_or_box(**pkw)
+
+            # ── Propagate ─────────────────────────────────────────────
             collected: dict[int, torch.Tensor] = {}
-            with _autocast(dtype, device):
-                for fidx, _oids, logits in video_pred.propagate_in_video(state):
-                    collected[fidx] = (logits[0, 0] > 0.0).float().cpu()
+
+            def _propagate(reverse=False):
+                with _autocast(dtype, device):
+                    for fidx, _oids, logits in video_pred.propagate_in_video(
+                        state, reverse=reverse
+                    ):
+                        combined = torch.zeros(H, W, dtype=torch.float32)
+                        for oid_idx in range(logits.shape[0]):
+                            mask = (logits[oid_idx, 0] > 0.0).float().cpu()
+                            if mask.shape[-2] != H or mask.shape[-1] != W:
+                                mask = F.interpolate(
+                                    mask.unsqueeze(0).unsqueeze(0),
+                                    size=(H, W), mode="bilinear", align_corners=False,
+                                ).squeeze(0).squeeze(0)
+                            combined = torch.maximum(combined, mask)
+                        collected[fidx] = combined
+
+            if tracking_direction in ("forward", "bidirectional"):
+                _propagate(reverse=False)
+            if tracking_direction in ("backward", "bidirectional"):
+                _propagate(reverse=True)
 
             out: list[torch.Tensor] = []
             for i in range(B):
@@ -601,6 +818,8 @@ class UnifiedSegmentationNode:
         H: int,
         W: int,
         is_video: bool,
+        tracking_direction: str = "forward",
+        annotation_frame_idx: int = 0,
     ):
         """SeC (MLLM + SAM2) segmentation.
 
@@ -641,10 +860,11 @@ class UnifiedSegmentationNode:
                 labels = pt_labels.astype(np.int32)
 
             # Handle bbox + points combination (bbox first, then refine with points)
+            ann_idx = min(annotation_frame_idx, B - 1)
             if box_np is not None and points is not None:
                 _, _, _ = model.grounding_encoder.add_new_points_or_box(
                     inference_state=inference_state,
-                    frame_idx=0,
+                    frame_idx=ann_idx,
                     obj_id=1,
                     points=None,
                     labels=None,
@@ -652,7 +872,7 @@ class UnifiedSegmentationNode:
                 )
                 _, _, out_mask_logits = model.grounding_encoder.add_new_points_or_box(
                     inference_state=inference_state,
-                    frame_idx=0,
+                    frame_idx=ann_idx,
                     obj_id=1,
                     points=points,
                     labels=labels,
@@ -661,7 +881,7 @@ class UnifiedSegmentationNode:
             elif points is not None or box_np is not None:
                 _, _, out_mask_logits = model.grounding_encoder.add_new_points_or_box(
                     inference_state=inference_state,
-                    frame_idx=0,
+                    frame_idx=ann_idx,
                     obj_id=1,
                     points=points,
                     labels=labels if points is not None else None,
@@ -677,23 +897,28 @@ class UnifiedSegmentationNode:
             # Propagate through video
             masks_tensor = torch.zeros(B, H, W, dtype=torch.float32)
 
-            for out_frame_idx, out_obj_ids, out_mask_logits in model.propagate_in_video(
-                inference_state,
-                start_frame_idx=0,
-                max_frame_num_to_track=B,
-                reverse=False,
-                init_mask=init_mask,
-                mllm_memory_size=12,
-            ):
-                if out_frame_idx < B:
-                    mask = (out_mask_logits[0] > 0.0).cpu().float()
-                    # Resize if needed
-                    if mask.shape[-2] != H or mask.shape[-1] != W:
-                        mask = F.interpolate(
-                            mask.unsqueeze(0).unsqueeze(0), size=(H, W),
-                            mode="bilinear", align_corners=False,
-                        ).squeeze(0).squeeze(0)
-                    masks_tensor[out_frame_idx] = mask
+            def _sec_propagate(reverse):
+                for out_frame_idx, out_obj_ids, out_mask_logits in model.propagate_in_video(
+                    inference_state,
+                    start_frame_idx=ann_idx,
+                    max_frame_num_to_track=B,
+                    reverse=reverse,
+                    init_mask=init_mask,
+                    mllm_memory_size=12,
+                ):
+                    if out_frame_idx < B:
+                        mask = (out_mask_logits[0] > 0.0).cpu().float()
+                        if mask.shape[-2] != H or mask.shape[-1] != W:
+                            mask = F.interpolate(
+                                mask.unsqueeze(0).unsqueeze(0), size=(H, W),
+                                mode="bilinear", align_corners=False,
+                            ).squeeze(0).squeeze(0)
+                        masks_tensor[out_frame_idx] = mask
+
+            if tracking_direction in ("forward", "bidirectional"):
+                _sec_propagate(reverse=False)
+            if tracking_direction in ("backward", "bidirectional"):
+                _sec_propagate(reverse=True)
 
             return masks_tensor, 1.0
 

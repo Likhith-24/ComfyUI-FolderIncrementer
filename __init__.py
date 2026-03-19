@@ -6,6 +6,8 @@ A growing collection of custom nodes:
   - MaskEditControl  – pinpoint mask editing, SAM2/SAM3, per-axis erode/expand,
                        point editing, bbox tools, video mask propagation,
                        alpha matting (ViTMatte / MatAnyone2)
+  - Universal Reroute – Nuke-style Dot node for clean wire management
+  - Parameter Memory  – tracks every parameter change with history & defaults
 """
 
 print("[MEC] Loading MaskEditControl node pack …")
@@ -37,6 +39,8 @@ from .nodes.trimap_generator import TrimapGeneratorMEC
 from .nodes.video_frame_extractor import VideoFrameExtractorMEC
 from .nodes.unified_segmentation_node import UnifiedSegmentationNode
 from .nodes.matting_node import MattingNode
+from .nodes.universal_reroute import UniversalRerouteMEC
+from .nodes.parameter_memory import ParameterHistoryMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -60,6 +64,8 @@ _MEC_MAPPINGS = {
     "VideoFrameExtractorMEC": VideoFrameExtractorMEC,
     "UnifiedSegmentationNode": UnifiedSegmentationNode,
     "MattingNode": MattingNode,
+    "UniversalRerouteMEC": UniversalRerouteMEC,
+    "ParameterHistoryMEC": ParameterHistoryMEC,
 }
 
 _MEC_DISPLAY = {
@@ -84,6 +90,8 @@ _MEC_DISPLAY = {
     "VideoFrameExtractorMEC": "Video Frame Extractor (MEC)",
     "UnifiedSegmentationNode": "Unified Segmentation (MEC)",
     "MattingNode": "Matting Node (MEC)",
+    "UniversalRerouteMEC": "Universal Reroute / Dot (MEC)",
+    "ParameterHistoryMEC": "Parameter History (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────
@@ -93,5 +101,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {**_FOLDER_DISPLAY, **_MEC_DISPLAY}
 WEB_DIRECTORY = "./js"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+# ── Register server routes for Parameter Memory ──────────────────────
+try:
+    import server as _comfy_server
+    from .nodes.parameter_memory import register_routes as _register_pm_routes
+    _register_pm_routes(_comfy_server.PromptServer.instance)
+    print("[MEC] Parameter Memory server route registered.")
+except Exception:
+    pass  # Server not available (e.g. during import-only testing)
 
 print(f"[MEC] Loaded {len(_MEC_MAPPINGS)} MaskEditControl nodes.")

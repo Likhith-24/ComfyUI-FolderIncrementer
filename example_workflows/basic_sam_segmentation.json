@@ -1,0 +1,187 @@
+{
+  "last_node_id": 7,
+  "last_link_id": 8,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [50, 200],
+      "size": [320, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": [1, 4], "slot_index": 0 },
+        { "name": "MASK", "type": "MASK", "links": null }
+      ],
+      "properties": { "Node name for S&R": "LoadImage" },
+      "widgets_values": ["example.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "SAMModelLoaderMEC",
+      "pos": [50, 50],
+      "size": [340, 130],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [
+        { "name": "sam_model", "type": "SAM_MODEL", "links": [2], "slot_index": 0 }
+      ],
+      "title": "SAM Model Loader",
+      "properties": { "Node name for S&R": "SAMModelLoaderMEC" },
+      "widgets_values": ["sam2.1_hiera_large.pt", "auto", "auto", false, "float16"],
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 3,
+      "type": "PointsMaskEditor",
+      "pos": [430, 50],
+      "size": [550, 650],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "reference_image", "type": "IMAGE", "link": 1 },
+        { "name": "existing_mask", "type": "MASK", "link": null }
+      ],
+      "outputs": [
+        { "name": "mask", "type": "MASK", "links": null, "slot_index": 0 },
+        { "name": "positive_coords", "type": "STRING", "links": null, "slot_index": 1 },
+        { "name": "negative_coords", "type": "STRING", "links": null, "slot_index": 2 },
+        { "name": "bboxes", "type": "BBOX", "links": null, "slot_index": 3 },
+        { "name": "neg_bboxes", "type": "BBOX", "links": null, "slot_index": 4 },
+        { "name": "points_json", "type": "STRING", "links": [3], "slot_index": 5 },
+        { "name": "bbox_json", "type": "STRING", "links": [5], "slot_index": 6 },
+        { "name": "primary_bbox", "type": "BBOX", "links": null, "slot_index": 7 }
+      ],
+      "title": "Points Mask Editor (Interactive)",
+      "properties": { "Node name for S&R": "PointsMaskEditor" },
+      "widgets_values": [512, 512, "{\"points\":[],\"bboxes\":[]}", 3.0, 1.0, true],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 4,
+      "type": "SAMMaskGeneratorMEC",
+      "pos": [1040, 50],
+      "size": [350, 380],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "sam_model", "type": "SAM_MODEL", "link": 2 },
+        { "name": "image", "type": "IMAGE", "link": 4 },
+        { "name": "points_json", "type": "STRING", "link": 3 },
+        { "name": "bbox_json", "type": "STRING", "link": 5 },
+        { "name": "bbox", "type": "BBOX", "link": null },
+        { "name": "existing_mask", "type": "MASK", "link": null }
+      ],
+      "outputs": [
+        { "name": "mask", "type": "MASK", "links": [6], "slot_index": 0 },
+        { "name": "all_masks", "type": "MASK", "links": null, "slot_index": 1 },
+        { "name": "detected_bbox", "type": "BBOX", "links": null, "slot_index": 2 },
+        { "name": "score", "type": "FLOAT", "links": null, "slot_index": 3 },
+        { "name": "info", "type": "STRING", "links": null, "slot_index": 4 }
+      ],
+      "title": "SAM Mask Generator",
+      "properties": { "Node name for S&R": "SAMMaskGeneratorMEC" },
+      "widgets_values": ["[]", "", true, 0, 0.0, false, 1, false],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 5,
+      "type": "MaskPreviewOverlay",
+      "pos": [1450, 50],
+      "size": [400, 500],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 7 },
+        { "name": "mask", "type": "MASK", "link": 6 },
+        { "name": "bbox", "type": "BBOX", "link": null }
+      ],
+      "outputs": [
+        { "name": "preview", "type": "IMAGE", "links": [8], "slot_index": 0 }
+      ],
+      "title": "Mask Preview Overlay",
+      "properties": { "Node name for S&R": "MaskPreviewOverlay" },
+      "widgets_values": ["overlay", 1.0, 0.0, 0.0, 0.4, 2, false, 0.0, 1.0, 0.0],
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 6,
+      "type": "PreviewImage",
+      "pos": [1900, 50],
+      "size": [400, 400],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 8 }
+      ],
+      "title": "Preview Result",
+      "properties": { "Node name for S&R": "PreviewImage" }
+    },
+    {
+      "id": 7,
+      "type": "Note",
+      "pos": [50, 570],
+      "size": [320, 160],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "properties": { "text": "" },
+      "widgets_values": [
+        "=== Basic SAM Segmentation ===\n\n1. Connect a Load Image node (replace 'example.png')\n2. Open the Points Mask Editor canvas\n3. Left-click = positive point (include region)\n   Right-click = negative point (exclude region)\n   Ctrl+Drag = draw bounding box\n4. Queue Prompt to generate the mask\n5. Preview shows the mask overlaid on the image\n\nTip: Use Ctrl+Scroll to zoom, Middle-drag to pan\nTip: Shift+click on a point to delete it"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 0, "IMAGE"],
+    [2, 2, 0, 4, 0, "SAM_MODEL"],
+    [3, 3, 5, 4, 2, "STRING"],
+    [4, 1, 0, 4, 1, "IMAGE"],
+    [5, 3, 6, 4, 3, "STRING"],
+    [6, 4, 0, 5, 1, "MASK"],
+    [7, 1, 0, 5, 0, "IMAGE"],
+    [8, 5, 0, 6, 0, "IMAGE"]
+  ],
+  "groups": [
+    {
+      "title": "1. Load Model & Image",
+      "bounding": [30, 20, 370, 530],
+      "color": "#88A",
+      "font_size": 24
+    },
+    {
+      "title": "2. Place Points & BBoxes",
+      "bounding": [410, 20, 580, 700],
+      "color": "#8A8",
+      "font_size": 24
+    },
+    {
+      "title": "3. Generate Mask",
+      "bounding": [1020, 20, 390, 430],
+      "color": "#A88",
+      "font_size": 24
+    },
+    {
+      "title": "4. Preview Result",
+      "bounding": [1430, 20, 920, 530],
+      "color": "#88A",
+      "font_size": 24
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": { "scale": 0.7, "offset": [50, 50] }
+  },
+  "version": 0.4
+}

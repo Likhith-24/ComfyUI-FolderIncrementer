@@ -420,6 +420,18 @@ def scan_model_dir(family: Optional[str] = None) -> list[str]:
             if os.path.isdir(local_dir) and os.listdir(local_dir):
                 located = True
 
+            # For SeC: also check for SeC-4B-*.safetensors or SeC-4B/ directory
+            if not located and reg.get("family") == "sec":
+                sams_dir = os.path.join(_MODELS_DIR, model_dir)
+                if os.path.isdir(sams_dir):
+                    for f in os.listdir(sams_dir):
+                        if f.startswith("SeC-4B") and (
+                            f.endswith(".safetensors") or
+                            os.path.isdir(os.path.join(sams_dir, f))
+                        ):
+                            located = True
+                            break
+
         if located:
             found.append(name)
         else:
@@ -577,16 +589,236 @@ def _load_matanyone2(path: str, reg: dict, dtype: torch.dtype, device: str):
 
 
 def _load_sec(path: str, reg: dict, dtype: torch.dtype, device: str):
-    """Load SeC model (MLLM + SAM2 grounding encoder)."""
-    raise NotImplementedError(
-        "SeC model support requires the sec inference package.  "
-        "This backend will be fully implemented in a future release."
+    """Load SeC model (MLLM + SAM2 grounding encoder).
+
+    Supports single-file safetensors (fp8/fp16/bf16/fp32) and sharded
+    directory models.  Uses the SeC inference package from third_party.
+    """
+    # Import SeC components — look in third_party first, then installed package
+    _sec_pkg = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "Comfyui-SecNodes",
     )
+    import sys
+    if _sec_pkg not in sys.path and os.path.isdir(_sec_pkg):
+        sys.path.insert(0, _sec_pkg)
+
+    try:
+        from inference.configuration_sec import SeCConfig
+        from inference.modeling_sec import SeCModel
+    except ImportError:
+        raise RuntimeError(
+            "SeC inference package not found.  Ensure third_party/Comfyui-SecNodes "
+            "is present or install the sec inference package."
+        )
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise RuntimeError("transformers package required for SeC.  pip install transformers")
+
+    # Determine if path is a single safetensors file or a directory
+    is_single_file = os.path.isfile(path) and path.endswith(".safetensors")
+    is_directory = os.path.isdir(path)
+
+    if not is_single_file and not is_directory:
+        # Try to scan models/sams/ for SeC files
+        sams_dir = os.path.join(_MODELS_DIR, "sams")
+        candidates = []
+        if os.path.isdir(sams_dir):
+            for f in os.listdir(sams_dir):
+                if f.startswith("SeC-4B") and f.endswith(".safetensors"):
+                    candidates.append(os.path.join(sams_dir, f))
+            # Also check for sharded directory
+            sec_dir = os.path.join(sams_dir, "SeC-4B")
+            if os.path.isdir(sec_dir):
+                candidates.append(sec_dir)
+
+        if not candidates:
+            raise RuntimeError(
+                "No SeC model found. Download a SeC-4B model to ComfyUI/models/sams/\n"
+                "Supported formats: SeC-4B-fp16.safetensors, SeC-4B-bf16.safetensors, "
+                "SeC-4B-fp32.safetensors, or SeC-4B/ sharded directory."
+            )
+        path = candidates[0]
+        is_single_file = os.path.isfile(path)
+        is_directory = os.path.isdir(path)
+
+    # Detect precision from filename
+    precision_str = "fp16"
+    path_lower = path.lower()
+    if "fp8" in path_lower:
+        precision_str = "fp8"
+    elif "fp32" in path_lower:
+        precision_str = "fp32"
+    elif "bf16" in path_lower:
+        precision_str = "bf16"
+
+    # Config path — use the third_party package config
+    config_path = os.path.join(_sec_pkg, "model_config", "SeC-4B")
+    if not os.path.isdir(config_path):
+        # Fallback: use the model directory itself if sharded
+        config_path = path if is_directory else os.path.dirname(path)
+
+    # Map precision to torch dtype
+    dtype_map = {
+        "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+        "float16": torch.float16, "fp16": torch.float16,
+        "float32": torch.float32, "fp32": torch.float32,
+        "fp8": torch.float16,  # FP8 is loaded then converted to FP16
+    }
+    torch_dtype = dtype_map.get(precision_str, dtype)
+
+    if device == "cpu" and torch_dtype != torch.float32:
+        logger.warning("[MEC] CPU mode requires float32 for SeC. Converting.")
+        torch_dtype = torch.float32
+
+    use_flash_attn = torch_dtype != torch.float32
+
+    logger.info("[MEC] Loading SeC model from %s [%s]", path, precision_str.upper())
+
+    config = SeCConfig.from_pretrained(config_path)
+    config.hydra_overrides_extra = ["++model.non_overlap_masks=false"]
+
+    if is_single_file:
+        try:
+            from safetensors.torch import load_file
+        except ImportError:
+            raise RuntimeError("safetensors required for single-file SeC models.")
+
+        try:
+            from accelerate import init_empty_weights
+            from accelerate.utils import set_module_tensor_to_device
+
+            with init_empty_weights():
+                model = SeCModel(config, use_flash_attn=use_flash_attn)
+
+            state_dict = load_file(path)
+
+            if precision_str == "fp8":
+                for key in list(state_dict.keys()):
+                    if state_dict[key].dtype == torch.float8_e4m3fn:
+                        state_dict[key] = state_dict[key].to(torch.float16)
+
+            for name, param in state_dict.items():
+                set_module_tensor_to_device(model, name, device="cpu", value=param)
+
+            model = model.eval()
+        except ImportError:
+            model = SeCModel(config, use_flash_attn=use_flash_attn)
+            state_dict = load_file(path)
+            if precision_str == "fp8":
+                for key in list(state_dict.keys()):
+                    if state_dict[key].dtype == torch.float8_e4m3fn:
+                        state_dict[key] = state_dict[key].to(torch.float16)
+            model.load_state_dict(state_dict, strict=True)
+            model = model.eval()
+
+        model = model.to(device=device, dtype=torch_dtype)
+    else:
+        # Directory-based (sharded) loading
+        load_kwargs = {
+            "config": config,
+            "torch_dtype": torch_dtype,
+            "use_flash_attn": use_flash_attn,
+            "low_cpu_mem_usage": True,
+        }
+        if device != "cpu":
+            load_kwargs["device_map"] = {"": device}
+
+        model = SeCModel.from_pretrained(path, **load_kwargs).eval()
+
+    # Set up tokenizer and prepare for generation
+    tokenizer = AutoTokenizer.from_pretrained(config_path, trust_remote_code=True)
+    model.preparing_for_generation(tokenizer=tokenizer, torch_dtype=torch_dtype)
+
+    # Store metadata for potential reload
+    model._sec_loading_metadata = {
+        "model_path": path,
+        "is_single_file": is_single_file,
+        "config_path": config_path,
+        "torch_dtype": torch_dtype,
+        "device": device,
+        "use_flash_attn": use_flash_attn,
+    }
+
+    logger.info("[MEC] SeC model loaded on %s (%s)", device, precision_str.upper())
+    return model
 
 
 def _load_videomama(path: str, reg: dict, dtype: torch.dtype, device: str):
-    """Load VideoMaMa model (SVD + fine-tuned UNet)."""
-    raise NotImplementedError(
-        "VideoMaMa model support requires the VideoMaMa pipeline package.  "
-        "This backend will be fully implemented in a future release."
+    """Load VideoMaMa model (SVD + fine-tuned UNet).
+
+    VideoMaMa requires:
+      - Base SVD model (stabilityai/stable-video-diffusion-img2vid-xt)
+      - Fine-tuned UNet checkpoint (SammyLim/VideoMaMa)
+
+    Returns a dict with the pipeline and metadata.
+    """
+    _vmama_pkg = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "ComfyUI-VideoMaMa",
     )
+    import sys
+    if _vmama_pkg not in sys.path and os.path.isdir(_vmama_pkg):
+        sys.path.insert(0, _vmama_pkg)
+
+    try:
+        from pipeline_svd_mask import VideoInferencePipeline
+    except ImportError:
+        raise RuntimeError(
+            "VideoMaMa pipeline not found.  Ensure third_party/ComfyUI-VideoMaMa "
+            "is present or install the VideoMaMa package."
+        )
+
+    # Resolve paths for base SVD model and UNet checkpoint
+    videomama_dir = os.path.join(_MODELS_DIR, "VideoMaMa")
+    base_model_path = os.path.join(videomama_dir, "stable-video-diffusion-img2vid-xt")
+    unet_path = os.path.join(videomama_dir, "VideoMaMa")
+
+    # Auto-download if needed
+    if not os.path.isdir(base_model_path) or not os.listdir(base_model_path):
+        try:
+            from huggingface_hub import snapshot_download
+            logger.info("[MEC] Downloading SVD base model for VideoMaMa...")
+            snapshot_download(
+                repo_id="stabilityai/stable-video-diffusion-img2vid-xt",
+                local_dir=base_model_path,
+            )
+        except ImportError:
+            raise RuntimeError(
+                "SVD base model not found and huggingface_hub not installed.\n"
+                "Download stabilityai/stable-video-diffusion-img2vid-xt to "
+                f"{base_model_path}"
+            )
+
+    if not os.path.isdir(unet_path) or not os.listdir(unet_path):
+        try:
+            from huggingface_hub import snapshot_download
+            logger.info("[MEC] Downloading VideoMaMa UNet checkpoint...")
+            snapshot_download(
+                repo_id="SammyLim/VideoMaMa",
+                local_dir=unet_path,
+            )
+        except ImportError:
+            raise RuntimeError(
+                "VideoMaMa UNet checkpoint not found and huggingface_hub not installed.\n"
+                "Download SammyLim/VideoMaMa to " + unet_path
+            )
+
+    weight_dtype = dtype
+
+    logger.info("[MEC] Loading VideoMaMa pipeline...")
+    pipeline = VideoInferencePipeline(
+        base_model_path=base_model_path,
+        unet_checkpoint_path=unet_path,
+        weight_dtype=weight_dtype,
+        device=device,
+        enable_model_cpu_offload=True,
+        vae_encode_chunk_size=4,
+        attention_mode="auto",
+        enable_vae_tiling=False,
+        enable_vae_slicing=True,
+    )
+
+    logger.info("[MEC] VideoMaMa pipeline loaded on %s", device)
+    return {"pipeline": pipeline, "device": device, "dtype": dtype}

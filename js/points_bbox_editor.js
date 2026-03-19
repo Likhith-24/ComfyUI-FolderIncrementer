@@ -69,6 +69,11 @@ class PointsBBoxEditor {
         this.dragStart  = null;
         this._dragEnd   = null;
 
+        // Point drag state
+        this.isDraggingPoint = false;
+        this.dragPointIndex  = -1;
+        this._dragPointOriginal = null;
+
         // Reference image
         this._refImage  = null;
         this._refLoaded = false;
@@ -406,7 +411,7 @@ class PointsBBoxEditor {
             `zoom: ${(this.zoom * 100).toFixed(0)}%`,
         ];
         ctx.fillText(statusParts.join("  \u2502  "), x + 8, y + h - 6);
-        const helpText = "L=+pt  R=\u2212pt  Ctrl+drag=bbox  Shift=del  Scroll=radius  Ctrl+Scroll=zoom  Del=hovered";
+        const helpText = "L=+pt  R=\u2212pt  Drag=move  Ctrl+drag=bbox  Shift=del  Scroll=radius  Ctrl+Scroll=zoom  Del=hovered";
         const helpW = ctx.measureText(helpText).width;
         ctx.fillStyle = "#585b70";
         ctx.fillText(helpText, x + w - helpW - 8, y + h - 6);
@@ -622,7 +627,12 @@ app.registerExtension({
             const hW = node.widgets?.find(w => w.name === "height");
             if (wW && hW) { editor._canvasW = wW.value; editor._canvasH = hW.value; }
         }
+        function syncRadius() {
+            const rW = node.widgets?.find(w => w.name === "default_radius");
+            if (rW) editor.currentRadius = rW.value;
+        }
         syncCanvasSize();
+        syncRadius();
         for (const wName of ["width", "height"]) {
             const wid = node.widgets?.find(w => w.name === wName);
             if (wid) {
@@ -634,6 +644,16 @@ app.registerExtension({
                     render();
                 };
             }
+        }
+        // Sync default_radius widget → editor.currentRadius
+        const radiusWid = node.widgets?.find(w => w.name === "default_radius");
+        if (radiusWid) {
+            const origRadiusCb = radiusWid.callback;
+            radiusWid.callback = function(v) {
+                origRadiusCb?.call(this, v);
+                editor.currentRadius = v;
+                render();
+            };
         }
 
         // ── Try to load reference image ──────────────────────────────
@@ -768,6 +788,16 @@ app.registerExtension({
                     }
                     return;
                 }
+                // Check if clicking on existing point → start drag
+                const hitIdx = editor.findPointAt(c.x, c.y);
+                if (hitIdx >= 0 && e.button === 0) {
+                    editor.saveState();
+                    editor.isDraggingPoint = true;
+                    editor.dragPointIndex = hitIdx;
+                    editor._dragPointOriginal = { ...editor.points[hitIdx] };
+                    canvas.style.cursor = "grabbing";
+                    return;
+                }
                 editor.saveState();
                 editor.points.push({
                     x: parseFloat(c.x.toFixed(2)),
@@ -794,7 +824,9 @@ app.registerExtension({
                 return;
             }
             if (editor._hoveredButton) { editor._hoveredButton = null; render(); }
-            canvas.style.cursor = editor.isPanning ? "grab" : "crosshair";
+            canvas.style.cursor = editor.isPanning ? "grab" :
+                                  editor.isDraggingPoint ? "grabbing" :
+                                  (editor.hoveredPoint >= 0 ? "grab" : "crosshair");
 
             const canvasSy = sy - TOOLBAR_H;
             const c = editor.screenToCanvas(sx, canvasSy);
@@ -806,12 +838,23 @@ app.registerExtension({
                 editor.panY = e.clientY - editor.panStart.y;
                 render(); return;
             }
+            if (editor.isDraggingPoint && editor.dragPointIndex >= 0) {
+                const p = editor.points[editor.dragPointIndex];
+                p.x = parseFloat(c.x.toFixed(2));
+                p.y = parseFloat(c.y.toFixed(2));
+                editor.hoveredPoint = editor.dragPointIndex;
+                editor.updateWidgets();
+                render(); return;
+            }
             if (editor.isBboxDrag) { editor._dragEnd = { x: c.x, y: c.y }; render(); return; }
 
             const oldP = editor.hoveredPoint, oldB = editor.hoveredBbox;
             editor.hoveredPoint = editor.findPointAt(c.x, c.y);
             editor.hoveredBbox  = editor.hoveredPoint < 0 ? editor.findBboxAt(c.x, c.y) : -1;
-            if (oldP !== editor.hoveredPoint || oldB !== editor.hoveredBbox) render();
+            if (oldP !== editor.hoveredPoint || oldB !== editor.hoveredBbox) {
+                canvas.style.cursor = editor.hoveredPoint >= 0 ? "grab" : "crosshair";
+                render();
+            }
         });
 
         // ── POINTER UP ───────────────────────────────────────────────
@@ -819,6 +862,15 @@ app.registerExtension({
             e.stopPropagation();
             try { canvas.releasePointerCapture(e.pointerId); } catch(_) {}
             if (editor.isPanning) { editor.isPanning = false; canvas.style.cursor = "crosshair"; return; }
+            if (editor.isDraggingPoint) {
+                editor.isDraggingPoint = false;
+                editor.dragPointIndex = -1;
+                editor._dragPointOriginal = null;
+                canvas.style.cursor = "crosshair";
+                editor.updateWidgets();
+                render();
+                return;
+            }
             if (editor.isBboxDrag && editor.dragStart && editor._dragEnd) {
                 const x1 = Math.min(editor.dragStart.x, editor._dragEnd.x);
                 const y1 = Math.min(editor.dragStart.y, editor._dragEnd.y);
@@ -854,6 +906,9 @@ app.registerExtension({
                 // Plain scroll = adjust point radius
                 editor.currentRadius += e.deltaY < 0 ? 0.5 : -0.5;
                 editor.currentRadius = Math.max(0.5, Math.min(editor.currentRadius, 256));
+                // Sync back to widget
+                const rW = node.widgets?.find(w => w.name === "default_radius");
+                if (rW) rW.value = editor.currentRadius;
             }
             render();
         }, { passive: false });

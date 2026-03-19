@@ -12,6 +12,7 @@ All model I/O delegated to model_manager.py.
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
@@ -403,7 +404,15 @@ class UnifiedSegmentationNode:
         except ImportError:
             raise RuntimeError("sam2 package is required for video propagation.")
 
-        video_pred = SAM2VideoPredictor(model)
+        # Upgrade SAM2Base → SAM2VideoPredictor in-place (avoids reloading).
+        # SAM2VideoPredictor inherits from SAM2Base and only adds 4 attrs.
+        if not isinstance(model, SAM2VideoPredictor):
+            model.__class__ = SAM2VideoPredictor
+            model.fill_hole_area = 8
+            model.non_overlap_masks = False
+            model.clear_non_cond_mem_around_input = False
+            model.add_all_frames_to_correct_as_cond = False
+        video_pred = model
 
         # Save frames to temp JPEG dir (required by init_state)
         tmp = tempfile.mkdtemp(prefix="mec_vid_")
@@ -575,7 +584,7 @@ class UnifiedSegmentationNode:
             shutil.rmtree(tmp, ignore_errors=True)
 
     # ══════════════════════════════════════════════════════════════════
-    #  SeC Dispatcher (stub)
+    #  SeC Dispatcher
     # ══════════════════════════════════════════════════════════════════
 
     def _run_sec(
@@ -595,17 +604,108 @@ class UnifiedSegmentationNode:
     ):
         """SeC (MLLM + SAM2) segmentation.
 
-        Requires SeC package. Uses text prompt with "It is [SEG]." suffix,
-        points/bbox as refinement prompts, and HSV histogram scene-change
-        detection for video re-prompting.
+        Uses the grounding_encoder from the SeC model to perform
+        concept-driven video/image segmentation.  Saves frames as
+        temp JPEGs for the SAM2 video predictor interface.
         """
-        raise NotImplementedError(
-            "SeC model support requires the sec inference package.  "
-            "This backend will be fully implemented in a future release."
-        )
+        from PIL import Image
+
+        # SeC always works in video mode via grounding_encoder
+        # For single images, wrap as 1-frame video
+        tmp = tempfile.mkdtemp(prefix="mec_sec_")
+        try:
+            # Save frames as JPEG files for the SAM2 video predictor
+            for i in range(B):
+                frame_np = (image[i].cpu().numpy() * 255).astype(np.uint8)
+                pil_img = Image.fromarray(frame_np, mode="RGB")
+                pil_img.save(os.path.join(tmp, f"{i:05d}.jpg"), "JPEG", quality=95)
+
+            # Initialize inference state
+            try:
+                offload_state_to_cpu = str(getattr(model, "device", device)) == "cpu"
+            except Exception:
+                offload_state_to_cpu = False
+
+            inference_state = model.grounding_encoder.init_state(
+                video_path=tmp,
+                offload_video_to_cpu=False,
+                offload_state_to_cpu=offload_state_to_cpu,
+            )
+            model.grounding_encoder.reset_state(inference_state)
+
+            # Combine positive and negative points
+            points = None
+            labels = None
+            if pt_coords is not None and pt_labels is not None:
+                points = pt_coords.astype(np.float32)
+                labels = pt_labels.astype(np.int32)
+
+            # Handle bbox + points combination (bbox first, then refine with points)
+            if box_np is not None and points is not None:
+                _, _, _ = model.grounding_encoder.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=0,
+                    obj_id=1,
+                    points=None,
+                    labels=None,
+                    box=box_np.astype(np.float32),
+                )
+                _, _, out_mask_logits = model.grounding_encoder.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=0,
+                    obj_id=1,
+                    points=points,
+                    labels=labels,
+                    box=None,
+                )
+            elif points is not None or box_np is not None:
+                _, _, out_mask_logits = model.grounding_encoder.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=0,
+                    obj_id=1,
+                    points=points,
+                    labels=labels if points is not None else None,
+                    box=box_np.astype(np.float32) if box_np is not None else None,
+                )
+            else:
+                raise ValueError(
+                    "SeC requires at least one visual prompt (points or bbox)."
+                )
+
+            init_mask = (out_mask_logits[0] > 0.0).cpu().numpy()
+
+            # Propagate through video
+            masks_tensor = torch.zeros(B, H, W, dtype=torch.float32)
+
+            for out_frame_idx, out_obj_ids, out_mask_logits in model.propagate_in_video(
+                inference_state,
+                start_frame_idx=0,
+                max_frame_num_to_track=B,
+                reverse=False,
+                init_mask=init_mask,
+                mllm_memory_size=12,
+            ):
+                if out_frame_idx < B:
+                    mask = (out_mask_logits[0] > 0.0).cpu().float()
+                    # Resize if needed
+                    if mask.shape[-2] != H or mask.shape[-1] != W:
+                        mask = F.interpolate(
+                            mask.unsqueeze(0).unsqueeze(0), size=(H, W),
+                            mode="bilinear", align_corners=False,
+                        ).squeeze(0).squeeze(0)
+                    masks_tensor[out_frame_idx] = mask
+
+            return masks_tensor, 1.0
+
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            # Clear GPU cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
 
     # ══════════════════════════════════════════════════════════════════
-    #  VideoMaMa Dispatcher (stub)
+    #  VideoMaMa Dispatcher
     # ══════════════════════════════════════════════════════════════════
 
     def _run_videomama(
@@ -619,12 +719,78 @@ class UnifiedSegmentationNode:
         H: int,
         W: int,
     ):
-        """VideoMaMa – mask-conditioned video generation.
+        """VideoMaMa – mask-conditioned video matting.
 
-        Pipeline: SAM2 first-frame mask → propagate → resize to 1024×576
-        → SVD UNet → VAE decode → resize back.
+        Takes video frames + initial masks, runs SVD-based UNet inference
+        to produce refined alpha matte masks for all frames.
         """
-        raise NotImplementedError(
-            "VideoMaMa model support requires the VideoMaMa pipeline.  "
-            "This backend will be fully implemented in a future release."
+        from PIL import Image
+
+        if existing_mask is None:
+            raise ValueError(
+                "VideoMaMa requires an existing_mask input. "
+                "Connect a mask from SAM2/SAM3/SeC segmentation."
+            )
+
+        pipeline = model["pipeline"]
+
+        # Convert frames to PIL and resize
+        max_resolution = 1024
+        orig_h, orig_w = H, W
+        if orig_w >= orig_h:
+            target_w = max_resolution
+            target_h = int(orig_h * max_resolution / orig_w)
+        else:
+            target_h = max_resolution
+            target_w = int(orig_w * max_resolution / orig_h)
+        target_w = max((target_w // 8) * 8, 8)
+        target_h = max((target_h // 8) * 8, 8)
+
+        cond_frames = []
+        mask_frames = []
+
+        for i in range(B):
+            img_np = (image[i].cpu().numpy() * 255).astype(np.uint8)
+            pil_img = Image.fromarray(img_np, mode="RGB")
+            cond_frames.append(pil_img.resize((target_w, target_h), Image.LANCZOS))
+
+            if existing_mask.dim() == 2:
+                mask_np = (existing_mask.cpu().numpy() * 255).astype(np.uint8)
+            elif i < existing_mask.shape[0]:
+                mask_np = (existing_mask[i].cpu().numpy() * 255).astype(np.uint8)
+            else:
+                # Repeat last mask if not enough masks
+                mask_np = (existing_mask[-1].cpu().numpy() * 255).astype(np.uint8)
+
+            if mask_np.ndim > 2:
+                mask_np = np.squeeze(mask_np)
+                while mask_np.ndim > 2:
+                    mask_np = mask_np[0]
+
+            pil_mask = Image.fromarray(mask_np, mode="L")
+            mask_frames.append(pil_mask.resize((target_w, target_h), Image.LANCZOS))
+
+        logger.info("[MEC] Running VideoMaMa on %d frames (%dx%d → %dx%d)",
+                     B, orig_w, orig_h, target_w, target_h)
+
+        output_frames_pil = pipeline.run(
+            cond_frames=cond_frames,
+            mask_frames=mask_frames,
+            seed=42,
+            fps=7,
+            motion_bucket_id=127,
+            noise_aug_strength=0.0,
         )
+
+        # Convert output PIL frames back to mask tensor at original resolution
+        output_masks = []
+        for frame_pil in output_frames_pil:
+            frame_pil = frame_pil.resize((orig_w, orig_h), Image.LANCZOS)
+            frame_np = np.array(frame_pil).astype(np.float32) / 255.0
+            if frame_np.ndim == 3:
+                frame_np = frame_np.mean(axis=-1)
+            output_masks.append(frame_np)
+
+        masks_tensor = torch.from_numpy(np.stack(output_masks, axis=0))
+        logger.info("[MEC] VideoMaMa complete: %s", masks_tensor.shape)
+        return masks_tensor, 1.0

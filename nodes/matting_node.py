@@ -166,6 +166,10 @@ class MattingNode:
         "vitmatte_small",
         "vitmatte_base",
         "matanyone2",
+        "rvm_mobilenetv3",
+        "rvm_resnet50",
+        "cutie",
+        "sam_hq",
     ]
 
     @classmethod
@@ -182,9 +186,12 @@ class MattingNode:
                     "default": "auto",
                     "tooltip": (
                         "Matting backend.\n"
-                        "auto: VitMatte for images, MatAnyone2 for video.\n"
-                        "vitmatte_small/base: HF ViTMatte neural matting.\n"
-                        "matanyone2: Video matting with warmup protocol."
+                        "auto: VitMatte for B=1, MatAnyone2 for B>1.\n"
+                        "vitmatte_small/base: HuggingFace ViTMatte neural matting.\n"
+                        "matanyone2: Video matting with warmup protocol.\n"
+                        "rvm_mobilenetv3/resnet50: RobustVideoMatting (trimap-free, human-focused).\n"
+                        "cutie: CutIE video object segmentation (mask propagation).\n"
+                        "sam_hq: HQ-SAM refinement (requires SAM model + mask→point prompts)."
                     ),
                 }),
                 "edge_radius": ("INT", {
@@ -205,7 +212,10 @@ class MattingNode:
                 }),
                 "n_warmup": ("INT", {
                     "default": 5, "min": 1, "max": 30,
-                    "tooltip": "MatAnyone2 warmup frames (first frame repeated).",
+                    "tooltip": "MatAnyone2 / RVM warmup frames.",
+                }),
+                "sam_model": ("SAM_MODEL", {
+                    "tooltip": "Required for sam_hq backend. SAM model from SAM Model Loader.",
                 }),
             },
         }
@@ -215,9 +225,9 @@ class MattingNode:
     FUNCTION = "matte"
     CATEGORY = "MaskEditControl/Matting"
     DESCRIPTION = (
-        "Refine coarse segmentation masks to compositing-grade alpha mattes.  "
-        "VitMatte for images, MatAnyone2 for video.  "
-        "Auto-generates trimap via dilate XOR erode.\n\n"
+        "Unified alpha matting from coarse segmentation masks.\n"
+        "7 backends: ViTMatte (small/base), MatAnyone2, RVM (mobilenet/resnet), CutIE, HQ-SAM.\n"
+        "Auto mode selects the best backend based on input (image vs video).\n\n"
         "Outputs:\n"
         "  rgb: premultiplied image (image × alpha) [B,H,W,3]\n"
         "  alpha_mask: compositing-grade alpha [B,H,W]"
@@ -234,6 +244,7 @@ class MattingNode:
         erode_dilate: int,
         trimap: torch.Tensor | None = None,
         n_warmup: int = 5,
+        sam_model=None,
     ):
         B_img = image.shape[0]
         if mask.dim() == 2:
@@ -270,7 +281,10 @@ class MattingNode:
         # Decide backend
         actual_backend = backend
         if backend == "auto":
-            actual_backend = "matanyone2" if B > 1 else "vitmatte_small"
+            if B > 1:
+                actual_backend = "matanyone2"
+            else:
+                actual_backend = "vitmatte_small"
 
         # Dispatch
         if actual_backend.startswith("vitmatte"):
@@ -287,6 +301,16 @@ class MattingNode:
                 alpha_mask = self._run_vitmatte(
                     image, mask, "vitmatte_small", edge_radius, trimap, B, H, W,
                 )
+        elif actual_backend.startswith("rvm"):
+            alpha_mask = self._run_rvm(image, actual_backend, n_warmup, B, H, W)
+        elif actual_backend == "cutie":
+            alpha_mask = self._run_cutie(image, mask, B, H, W)
+        elif actual_backend == "sam_hq":
+            if sam_model is None:
+                raise ValueError("sam_hq backend requires a SAM model. Connect SAM Model Loader.")
+            alpha_mask = self._run_sam_hq_refine(
+                image, mask, sam_model, edge_radius, B, H, W,
+            )
         else:
             raise ValueError(f"Unknown matting backend: {actual_backend}")
 
@@ -423,5 +447,115 @@ class MattingNode:
             except Exception as exc:
                 logger.warning("[MEC] MatAnyone2 frame %d error: %s", i, exc)
                 alphas.append(mask[i].cpu())
+
+        return torch.stack(alphas)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  RobustVideoMatting Backend
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_rvm(self, image, variant, n_warmup, B, H, W):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        loaded = get_or_load_model(variant, precision="fp32", device=device)
+        model = loaded["model"]
+
+        # RVM processes video as sequential frames with recurrent hidden state
+        # Input: (B, C, H, W) per frame.  Output: alpha (B, 1, H, W), fgr (B, 3, H, W)
+        rec = [None] * 4  # recurrent states: r1, r2, r3, r4
+        downsample_ratio = 0.25  # default for speed
+
+        alphas = []
+        with torch.no_grad():
+            for i in range(B):
+                frame = image[min(i, image.shape[0] - 1)].permute(2, 0, 1).unsqueeze(0).to(device)
+                fgr, pha, *rec = model(frame, *rec, downsample_ratio)
+                alphas.append(pha[0, 0].cpu())
+
+        return torch.stack(alphas)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  CutIE Backend (Video Object Segmentation)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_cutie(self, image, mask, B, H, W):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        loaded = get_or_load_model("cutie_base_mega", precision="fp32", device=device)
+        processor = loaded["processor"]
+
+        # CutIE: first frame gets mask, subsequent frames are propagated
+        first_frame = image[0].permute(2, 0, 1).to(device)  # (C, H, W)
+        first_mask = (mask[0] > 0.5).long().to(device)  # (H, W) integer labels
+
+        # Encode first frame with mask (object label = 1)
+        with torch.no_grad():
+            processor.step(first_frame, first_mask, idx_mask=False)
+
+        alphas = [mask[0].cpu().float()]  # first frame uses the input mask
+
+        with torch.no_grad():
+            for i in range(1, B):
+                frame = image[min(i, image.shape[0] - 1)].permute(2, 0, 1).to(device)
+                output_prob = processor.step(frame)
+                # output_prob: (num_objects, H, W) probabilities
+                if output_prob.dim() == 3:
+                    alpha = output_prob[0].cpu().float()  # first object
+                else:
+                    alpha = output_prob.cpu().float()
+                alphas.append(alpha)
+
+        return torch.stack(alphas)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  HQ-SAM Refinement Backend
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_sam_hq_refine(self, image, mask, sam_model, edge_radius, B, H, W):
+        """Use HQ-SAM to refine a coarse mask by converting mask to point prompts."""
+        from .utils import mask_to_bbox
+
+        model_info = sam_model
+        model = model_info["model"]
+
+        try:
+            from segment_anything_hq import SamPredictor as HQSamPredictor
+        except ImportError:
+            from segment_anything import SamPredictor as HQSamPredictor
+
+        predictor = HQSamPredictor(model)
+
+        alphas = []
+        for i in range(B):
+            img_np = (image[min(i, image.shape[0] - 1)].cpu().numpy() * 255).astype(np.uint8)
+            mask_np = mask[i].cpu().numpy()
+
+            predictor.set_image(img_np)
+
+            # Derive bbox from mask
+            bbox = mask_to_bbox(mask[i])
+            box_np = np.array([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]],
+                              dtype=np.float32)
+
+            # Sample a positive point from mask center of mass
+            ys, xs = np.where(mask_np > 0.5)
+            if len(ys) > 0:
+                cx, cy = float(xs.mean()), float(ys.mean())
+                point_coords = np.array([[cx, cy]], dtype=np.float32)
+                point_labels = np.array([1], dtype=np.int32)
+            else:
+                point_coords = None
+                point_labels = None
+
+            kwargs = {"multimask_output": False, "box": box_np}
+            if point_coords is not None:
+                kwargs["point_coords"] = point_coords
+                kwargs["point_labels"] = point_labels
+
+            try:
+                masks_np, scores, _ = predictor.predict(**kwargs)
+                alpha = torch.from_numpy(masks_np[0].astype(np.float32))
+            except Exception:
+                alpha = mask[i].cpu()
+
+            alphas.append(alpha)
 
         return torch.stack(alphas)

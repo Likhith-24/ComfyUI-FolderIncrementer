@@ -1,6 +1,6 @@
 {
-  "last_node_id": 7,
-  "last_link_id": 9,
+  "last_node_id": 8,
+  "last_link_id": 8,
   "nodes": [
     {
       "id": 1,
@@ -123,14 +123,34 @@
     },
     {
       "id": 7,
-      "type": "PreviewImage",
+      "type": "MaskPreviewOverlay",
       "pos": [1170, 350],
-      "size": [350, 300],
+      "size": [350, 250],
       "flags": {},
       "order": 6,
       "mode": 0,
       "inputs": [
-        { "name": "images", "type": "IMAGE", "link": 7 }
+        { "name": "image", "type": "IMAGE", "link": null },
+        { "name": "mask", "type": "MASK", "link": 7 },
+        { "name": "bbox", "type": "BBOX", "link": null }
+      ],
+      "outputs": [
+        { "name": "preview", "type": "IMAGE", "links": [8], "slot_index": 0 }
+      ],
+      "title": "Preview: BBox as Mask",
+      "properties": { "Node name for S&R": "MaskPreviewOverlay" },
+      "widgets_values": ["mask_only", 1.0, 0.0, 0.0, 0.4, 2, false, 0.0, 1.0, 0.0]
+    },
+    {
+      "id": 8,
+      "type": "PreviewImage",
+      "pos": [1530, 350],
+      "size": [350, 300],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 8 }
       ],
       "title": "Preview: BBox as Mask",
       "properties": { "Node name for S&R": "PreviewImage" }
@@ -143,7 +163,8 @@
     [4, 2, 0, 5, 0, "BBOX"],
     [5, 3, 0, 4, 1, "BBOX"],
     [6, 4, 0, 6, 0, "IMAGE"],
-    [7, 5, 0, 7, 0, "MASK"]
+    [7, 5, 0, 7, 1, "MASK"],
+    [8, 7, 0, 8, 0, "IMAGE"]
   ],
   "groups": [
     {

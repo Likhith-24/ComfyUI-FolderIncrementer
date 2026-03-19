@@ -37,6 +37,43 @@ logger = logging.getLogger("MEC")
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Attention Backend Configuration
+# ══════════════════════════════════════════════════════════════════════
+
+def _configure_attention(mode: str) -> None:
+    """Set the preferred attention backend for PyTorch.
+
+    Args:
+        mode: One of "sdpa", "flash_attn", "sage_attn", "xformers".
+    """
+    if mode == "sdpa":
+        # Enable SDPA (default in PyTorch 2.0+), disable others
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+    elif mode == "flash_attn":
+        try:
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(False)
+        except Exception:
+            logger.warning("[MEC] Flash Attention not available via SDPA; trying flash_attn package.")
+    elif mode == "sage_attn":
+        # SageAttention is monkey-patched at runtime by the sageattention package
+        try:
+            import sageattention  # noqa: F401
+            logger.info("[MEC] SageAttention available.")
+        except ImportError:
+            logger.warning("[MEC] sageattention package not installed. Using default attention.")
+    elif mode == "xformers":
+        try:
+            import xformers  # noqa: F401
+            logger.info("[MEC] xFormers available.")
+        except ImportError:
+            logger.warning("[MEC] xformers package not installed. Using default attention.")
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  Helpers
 # ══════════════════════════════════════════════════════════════════════
 
@@ -141,7 +178,7 @@ def _validate_output(
 #  Segmentation Families  (for scan filtering)
 # ══════════════════════════════════════════════════════════════════════
 
-_SEG_FAMILIES = {"sam2", "sam3", "sec", "videomama"}
+_SEG_FAMILIES = {"sam2", "sam3", "sec", "videomama", "sam_hq"}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -171,6 +208,15 @@ class UnifiedSegmentationNode:
             if reg and reg.get("family") in _SEG_FAMILIES:
                 result.append(entry)
         return result or ["(no models — select a [download] option)"]
+
+    @classmethod
+    def _scan_grounding_models(cls) -> list[str]:
+        """List available GroundingDINO models for text prompt masking."""
+        models = ["none"]
+        for name, reg in MODEL_REGISTRY.items():
+            if reg.get("family") == "groundingdino":
+                models.append(name)
+        return models
 
     # ── INPUT_TYPES ───────────────────────────────────────────────────
 
@@ -217,6 +263,17 @@ class UnifiedSegmentationNode:
                     "default": "fp16",
                     "tooltip": "Inference precision. fp16 saves VRAM, bf16 for newer GPUs.",
                 }),
+                "attention_mode": (["auto", "sdpa", "flash_attn", "sage_attn", "xformers"], {
+                    "default": "auto",
+                    "tooltip": (
+                        "Attention backend for transformer models.\n"
+                        "auto: best available (Flash > SDPA > vanilla).\n"
+                        "sdpa: PyTorch scaled dot-product attention.\n"
+                        "flash_attn: Flash Attention 2 (requires flash-attn package).\n"
+                        "sage_attn: SageAttention (requires sageattention package).\n"
+                        "xformers: xFormers memory-efficient attention."
+                    ),
+                }),
             },
             "optional": {
                 "positive_coords": ("STRING", {
@@ -245,7 +302,23 @@ class UnifiedSegmentationNode:
                 }),
                 "text_prompt": ("STRING", {
                     "default": "",
-                    "tooltip": "Text description of target — SeC models only.",
+                    "tooltip": (
+                        "Text description of target object (e.g. 'person', 'dog').\n"
+                        "With GroundingDINO: converts text to bbox for any SAM model.\n"
+                        "With SeC: uses native text grounding."
+                    ),
+                }),
+                "grounding_model": (cls._scan_grounding_models(), {
+                    "default": "none",
+                    "tooltip": (
+                        "GroundingDINO model for text-to-bbox.\n"
+                        "Enables text prompt masking for SAM2/SAM3/HQ-SAM families.\n"
+                        "Set to 'none' for SeC native text grounding or to disable."
+                    ),
+                }),
+                "text_threshold": ("FLOAT", {
+                    "default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "GroundingDINO box confidence threshold.",
                 }),
                 "existing_mask": ("MASK", {
                     "tooltip": "Initial mask for refinement or VideoMaMa input.",
@@ -301,12 +374,15 @@ class UnifiedSegmentationNode:
         multimask: bool,
         mask_index: int,
         precision: str,
+        attention_mode: str = "auto",
         positive_coords: str | None = None,
         negative_coords: str | None = None,
         bbox=None,
         neg_bbox_json: str = "",
         neg_bboxes=None,
         text_prompt: str = "",
+        grounding_model: str = "none",
+        text_threshold: float = 0.25,
         existing_mask: torch.Tensor | None = None,
         keep_model_loaded: bool = True,
         tracking_direction: str = "forward",
@@ -323,7 +399,22 @@ class UnifiedSegmentationNode:
         family = reg["family"]
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
+        # ── Configure attention backend ───────────────────────────────
+        if attention_mode != "auto":
+            _configure_attention(attention_mode)
+
         model = get_or_load_model(clean, precision=precision, device=device)
+
+        # ── Text prompt → bbox via GroundingDINO (for non-SeC families) ──
+        if (text_prompt and text_prompt.strip()
+                and grounding_model != "none"
+                and family != "sec"):
+            text_bbox = self._text_to_bbox(
+                image, text_prompt.strip(), grounding_model,
+                text_threshold, device,
+            )
+            if text_bbox is not None and (not bbox_json or not bbox_json.strip()):
+                bbox_json = json.dumps(text_bbox.tolist())
 
         # ── Merge points from separate pos/neg inputs or combined JSON ──
         if positive_coords or negative_coords:
@@ -369,6 +460,11 @@ class UnifiedSegmentationNode:
                 model, image, existing_mask,
                 torch_dtype, device, B, H, W,
             )
+        elif family == "sam_hq":
+            masks, score = self._run_sam_hq(
+                model, image, pt_coords, pt_labels, pos_box,
+                multimask, mask_index, device, B, H, W,
+            )
         else:
             raise ValueError(f"Unsupported family: {family}")
 
@@ -388,6 +484,7 @@ class UnifiedSegmentationNode:
             "frames": B,
             "best_score": round(score, 4),
             "precision": precision,
+            "attention_mode": attention_mode,
             "tracking_direction": tracking_direction if is_video else "n/a",
             "annotation_frame": annotation_frame_idx if is_video else 0,
             "individual_objects": individual_objects,
@@ -1019,3 +1116,106 @@ class UnifiedSegmentationNode:
         masks_tensor = torch.from_numpy(np.stack(output_masks, axis=0))
         logger.info("[MEC] VideoMaMa complete: %s", masks_tensor.shape)
         return masks_tensor, 1.0
+
+    # ══════════════════════════════════════════════════════════════════
+    #  HQ-SAM Dispatcher
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_sam_hq(
+        self,
+        model_dict,
+        image: torch.Tensor,
+        pt_coords,
+        pt_labels,
+        box_np,
+        multimask: bool,
+        mask_idx: int,
+        device: str,
+        B: int,
+        H: int,
+        W: int,
+    ):
+        """HQ-SAM segmentation (image mode only, single-image per call)."""
+        try:
+            from segment_anything_hq import SamPredictor as HQSamPredictor
+        except ImportError:
+            from segment_anything import SamPredictor as HQSamPredictor
+
+        sam_model = model_dict["model"]
+        predictor = HQSamPredictor(sam_model)
+
+        all_masks = []
+        best_score = 0.0
+        for i in range(B):
+            img_np = (image[i].cpu().numpy() * 255).astype(np.uint8)
+            predictor.set_image(img_np)
+
+            kwargs = {"multimask_output": multimask}
+            if pt_coords is not None:
+                kwargs["point_coords"] = pt_coords
+                kwargs["point_labels"] = pt_labels
+            if box_np is not None:
+                kwargs["box"] = box_np
+
+            try:
+                masks_np, scores, _ = predictor.predict(**kwargs)
+            except Exception:
+                all_masks.append(torch.zeros(H, W, dtype=torch.float32))
+                continue
+
+            if masks_np is None or len(masks_np) == 0:
+                all_masks.append(torch.zeros(H, W, dtype=torch.float32))
+                continue
+
+            scores_list = scores.tolist() if hasattr(scores, "tolist") else list(scores)
+            idx = min(mask_idx, len(scores_list) - 1)
+            best_score = max(best_score, float(scores_list[idx]))
+            all_masks.append(torch.from_numpy(masks_np[idx].astype(np.float32)))
+
+        return torch.stack(all_masks), best_score
+
+    # ══════════════════════════════════════════════════════════════════
+    #  GroundingDINO Text-to-BBox
+    # ══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _text_to_bbox(image, text_prompt, grounding_model, text_threshold, device):
+        """Run GroundingDINO to convert text prompt to bounding box."""
+        try:
+            gdino_loaded = get_or_load_model(grounding_model, precision="fp32", device=device)
+        except Exception as e:
+            logger.warning("[MEC] GroundingDINO load failed: %s", e)
+            return None
+
+        gdino_model = gdino_loaded["model"]
+        img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
+        H, W = img_np.shape[:2]
+
+        try:
+            from groundingdino.util.inference import predict as gdino_predict
+            from PIL import Image as PILImage
+            import torchvision.transforms.functional as TF
+
+            pil_img = PILImage.fromarray(img_np)
+            img_tensor = TF.to_tensor(pil_img)
+            img_tensor = TF.normalize(img_tensor, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
+            boxes, logits, phrases = gdino_predict(
+                gdino_model, img_tensor, text_prompt,
+                box_threshold=text_threshold, text_threshold=text_threshold,
+            )
+
+            if len(boxes) == 0:
+                return None
+
+            best_idx = logits.argmax().item()
+            cx, cy, bw, bh = boxes[best_idx].tolist()
+            x1 = (cx - bw / 2) * W
+            y1 = (cy - bh / 2) * H
+            x2 = (cx + bw / 2) * W
+            y2 = (cy + bh / 2) * H
+            return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+        except Exception as e:
+            logger.warning("[MEC] GroundingDINO predict error: %s", e)
+            return None

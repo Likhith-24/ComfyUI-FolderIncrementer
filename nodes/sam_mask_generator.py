@@ -1,7 +1,8 @@
 """
 SAMMaskGeneratorMEC – Generate masks using a loaded SAM model with
-point prompts, bounding-box prompts, or both.  Supports VRAM offload,
-multi-mask output, score thresholding, and iterative refinement.
+point prompts, bounding-box prompts, text prompts (via GroundingDINO), or any
+combination.  Supports VRAM offload, multi-mask output, score thresholding,
+and iterative refinement.
 """
 
 import torch
@@ -18,6 +19,7 @@ from .utils import (
     parse_points_json,
     parse_bbox_input,
 )
+from .model_manager import get_or_load_model, MODEL_REGISTRY, scan_model_dir
 
 
 class SAMMaskGeneratorMEC:
@@ -27,6 +29,11 @@ class SAMMaskGeneratorMEC:
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Scan for GroundingDINO models
+        gdino_models = ["none"]
+        for name, reg in MODEL_REGISTRY.items():
+            if reg.get("family") == "groundingdino":
+                gdino_models.append(name)
         return {
             "required": {
                 "sam_model": ("SAM_MODEL",),
@@ -46,6 +53,30 @@ class SAMMaskGeneratorMEC:
                         'Bounding box as JSON: [x1, y1, x2, y2] or {"x":..,"y":..,"w":..,"h":..}. '
                         'Leave empty to use only point prompts.'
                     ),
+                }),
+                "text_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": (
+                        "Text description of target object (e.g. 'person', 'dog', 'car').\n"
+                        "Requires a GroundingDINO model. Converts text to bounding box, "
+                        "then feeds to SAM for precise mask generation."
+                    ),
+                }),
+                "grounding_model": (gdino_models, {
+                    "default": "none",
+                    "tooltip": (
+                        "GroundingDINO model for text-to-bbox grounding.\n"
+                        "Set to 'none' to disable text prompting."
+                    ),
+                }),
+                "text_threshold": ("FLOAT", {
+                    "default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "GroundingDINO box confidence threshold.",
+                }),
+                "text_box_threshold": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "GroundingDINO text-box association threshold.",
                 }),
                 "multimask_output": ("BOOLEAN", {"default": True,
                                                    "tooltip": "Return 3 candidate masks (SAM default) vs 1"}),
@@ -88,6 +119,7 @@ class SAMMaskGeneratorMEC:
     )
 
     def generate(self, sam_model, image, points_json, bbox_json,
+                 text_prompt, grounding_model, text_threshold, text_box_threshold,
                  multimask_output, mask_index, score_threshold,
                  apply_bbox_crop, refine_iterations=1,
                  auto_negative_points=False, bbox=None, existing_mask=None):
@@ -98,6 +130,17 @@ class SAMMaskGeneratorMEC:
         target_device = model_info["device"]
         offload = model_info["offload_to_cpu"]
         model_dtype = model_info["dtype"]
+
+        # ── Text prompt → bbox via GroundingDINO ───────────────────────
+        if text_prompt and text_prompt.strip() and grounding_model != "none":
+            text_bbox = self._text_to_bbox(
+                image, text_prompt.strip(), grounding_model,
+                text_threshold, text_box_threshold, target_device,
+            )
+            if text_bbox is not None:
+                # Text-derived bbox supplements existing bbox_json
+                if not bbox_json or not bbox_json.strip():
+                    bbox_json = json.dumps(text_bbox.tolist())
 
         # ── Move model to GPU if offloaded ─────────────────────────────
         if offload and hasattr(model, "to"):
@@ -287,3 +330,57 @@ class SAMMaskGeneratorMEC:
         # Return an empty mask as fallback
         n = 3 if multimask else 1
         return np.zeros((n, H, W), dtype=np.float32), np.zeros(n, dtype=np.float32)
+
+    @staticmethod
+    def _text_to_bbox(image, text_prompt, grounding_model, text_threshold,
+                      box_threshold, device):
+        """Run GroundingDINO to convert text prompt to bounding box.
+
+        Returns np.ndarray [x1, y1, x2, y2] or None.
+        """
+        try:
+            gdino_loaded = get_or_load_model(grounding_model, precision="fp32", device=device)
+        except Exception as e:
+            import logging
+            logging.getLogger("MEC").warning("[MEC] GroundingDINO load failed: %s", e)
+            return None
+
+        gdino_model = gdino_loaded["model"]
+        img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
+        H, W = img_np.shape[:2]
+
+        try:
+            from groundingdino.util.inference import predict as gdino_predict
+            from PIL import Image as PILImage
+            import torchvision.transforms.functional as TF
+
+            pil_img = PILImage.fromarray(img_np)
+            # GroundingDINO expects a normalized tensor
+            img_tensor = TF.to_tensor(pil_img)
+            img_tensor = TF.normalize(img_tensor, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
+            boxes, logits, phrases = gdino_predict(
+                gdino_model,
+                img_tensor,
+                text_prompt,
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+            )
+
+            if len(boxes) == 0:
+                return None
+
+            # boxes are in cx, cy, w, h format normalized to [0,1]
+            # Convert to x1, y1, x2, y2 absolute
+            best_idx = logits.argmax().item()
+            cx, cy, bw, bh = boxes[best_idx].tolist()
+            x1 = (cx - bw / 2) * W
+            y1 = (cy - bh / 2) * H
+            x2 = (cx + bw / 2) * W
+            y2 = (cy + bh / 2) * H
+            return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+        except Exception as e:
+            import logging
+            logging.getLogger("MEC").warning("[MEC] GroundingDINO predict error: %s", e)
+            return None

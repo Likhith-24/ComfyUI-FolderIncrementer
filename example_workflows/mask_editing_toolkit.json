@@ -1,6 +1,6 @@
 {
-  "last_node_id": 8,
-  "last_link_id": 9,
+  "last_node_id": 10,
+  "last_link_id": 11,
   "nodes": [
     {
       "id": 1,
@@ -134,7 +134,7 @@
         { "name": "bbox", "type": "BBOX", "link": null }
       ],
       "outputs": [
-        { "name": "preview", "type": "IMAGE", "links": null, "slot_index": 0 }
+        { "name": "preview", "type": "IMAGE", "links": [10], "slot_index": 0 }
       ],
       "title": "Preview: Composite Result",
       "properties": { "Node name for S&R": "MaskPreviewOverlay" },
@@ -145,13 +145,49 @@
     {
       "id": 8,
       "type": "PreviewImage",
-      "pos": [1960, 50],
+      "pos": [1960, 300],
       "size": [350, 300],
       "flags": {},
       "order": 7,
       "mode": 0,
       "inputs": [
-        { "name": "images", "type": "IMAGE", "link": 7 }
+        { "name": "images", "type": "IMAGE", "link": 10 }
+      ],
+      "title": "Preview: Composite Result",
+      "properties": { "Node name for S&R": "PreviewImage" }
+    },
+    {
+      "id": 9,
+      "type": "MaskPreviewOverlay",
+      "pos": [1960, 50],
+      "size": [350, 250],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": null },
+        { "name": "mask", "type": "MASK", "link": 7 },
+        { "name": "bbox", "type": "BBOX", "link": null }
+      ],
+      "outputs": [
+        { "name": "preview", "type": "IMAGE", "links": [11], "slot_index": 0 }
+      ],
+      "title": "Preview: After Gamma",
+      "properties": { "Node name for S&R": "MaskPreviewOverlay" },
+      "widgets_values": ["mask_only", 1.0, 0.0, 0.0, 0.4, 2, false, 0.0, 1.0, 0.0],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 10,
+      "type": "PreviewImage",
+      "pos": [2370, 50],
+      "size": [350, 300],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 11 }
       ],
       "title": "Preview: After Gamma",
       "properties": { "Node name for S&R": "PreviewImage" }
@@ -163,9 +199,11 @@
     [3, 4, 0, 5, 0, "MASK"],
     [5, 5, 0, 6, 0, "MASK"],
     [6, 5, 0, 7, 1, "MASK"],
-    [7, 6, 0, 8, 0, "MASK"],
+    [7, 6, 0, 9, 1, "MASK"],
     [8, 1, 0, 2, 1, "IMAGE"],
-    [9, 1, 0, 3, 1, "IMAGE"]
+    [9, 1, 0, 3, 1, "IMAGE"],
+    [10, 7, 0, 8, 0, "IMAGE"],
+    [11, 9, 0, 10, 0, "IMAGE"]
   ],
   "groups": [
     {

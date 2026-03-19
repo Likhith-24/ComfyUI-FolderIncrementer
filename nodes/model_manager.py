@@ -162,6 +162,82 @@ MODEL_REGISTRY: dict[str, dict] = {
         "version": "2.0",
         "model_dir": "matanyone2",
     },
+    # ── HQ-SAM (High-Quality Segment Anything) ──────────────────────
+    "sam_hq_vit_h": {
+        "family": "sam_hq",
+        "repo_id": "lkeab/hq-sam",
+        "filename": "sam_hq_vit_h.pth",
+        "config": None,
+        "version": "vit_h",
+        "model_dir": "sams",
+    },
+    "sam_hq_vit_l": {
+        "family": "sam_hq",
+        "repo_id": "lkeab/hq-sam",
+        "filename": "sam_hq_vit_l.pth",
+        "config": None,
+        "version": "vit_l",
+        "model_dir": "sams",
+    },
+    "sam_hq_vit_b": {
+        "family": "sam_hq",
+        "repo_id": "lkeab/hq-sam",
+        "filename": "sam_hq_vit_b.pth",
+        "config": None,
+        "version": "vit_b",
+        "model_dir": "sams",
+    },
+    "sam_hq_vit_tiny": {
+        "family": "sam_hq",
+        "repo_id": "lkeab/hq-sam",
+        "filename": "sam_hq_vit_tiny.pth",
+        "config": None,
+        "version": "vit_tiny",
+        "model_dir": "sams",
+    },
+    # ── GroundingDINO (Text-to-BBox) ─────────────────────────────────
+    "groundingdino_swint_ogc": {
+        "family": "groundingdino",
+        "repo_id": "ShilongLiu/GroundingDINO",
+        "filename": "groundingdino_swint_ogc.pth",
+        "config": None,
+        "version": "swint",
+        "model_dir": "grounding-dino",
+    },
+    "groundingdino_swinb_cogcoor": {
+        "family": "groundingdino",
+        "repo_id": "ShilongLiu/GroundingDINO",
+        "filename": "groundingdino_swinb_cogcoor.pth",
+        "config": None,
+        "version": "swinb",
+        "model_dir": "grounding-dino",
+    },
+    # ── RobustVideoMatting ───────────────────────────────────────────
+    "rvm_mobilenetv3": {
+        "family": "rvm",
+        "repo_id": "PeterL1n/RobustVideoMatting",
+        "filename": "rvm_mobilenetv3.pth",
+        "config": None,
+        "version": "mobilenetv3",
+        "model_dir": "rvm",
+    },
+    "rvm_resnet50": {
+        "family": "rvm",
+        "repo_id": "PeterL1n/RobustVideoMatting",
+        "filename": "rvm_resnet50.pth",
+        "config": None,
+        "version": "resnet50",
+        "model_dir": "rvm",
+    },
+    # ── CutIE (Video Object Segmentation) ────────────────────────────
+    "cutie_base_mega": {
+        "family": "cutie",
+        "repo_id": "hkchengrex/Cutie",
+        "filename": "cutie-base-mega.pth",
+        "config": None,
+        "version": "base-mega",
+        "model_dir": "cutie",
+    },
 }
 
 
@@ -344,6 +420,14 @@ def get_or_load_model(
         model = _load_sec(path, reg, dtype, device)
     elif family == "videomama":
         model = _load_videomama(path, reg, dtype, device)
+    elif family == "sam_hq":
+        model = _load_sam_hq(path, reg, dtype, device)
+    elif family == "groundingdino":
+        model = _load_groundingdino(path, reg, dtype, device)
+    elif family == "rvm":
+        model = _load_rvm(path, reg, dtype, device)
+    elif family == "cutie":
+        model = _load_cutie(path, reg, dtype, device)
     else:
         raise ValueError(f"Unknown model family: {family}")
 
@@ -822,3 +906,144 @@ def _load_videomama(path: str, reg: dict, dtype: torch.dtype, device: str):
 
     logger.info("[MEC] VideoMaMa pipeline loaded on %s", device)
     return {"pipeline": pipeline, "device": device, "dtype": dtype}
+
+
+def _load_sam_hq(path: str, reg: dict, dtype: torch.dtype, device: str):
+    """Load HQ-SAM model."""
+    try:
+        from segment_anything_hq import sam_model_registry
+    except ImportError:
+        try:
+            from segment_anything import sam_model_registry
+        except ImportError:
+            raise RuntimeError(
+                "segment_anything_hq or segment_anything is required for HQ-SAM.\n"
+                "  pip install segment-anything-hq"
+            )
+
+    vit_type = reg.get("version", "vit_h")
+    model = sam_model_registry[vit_type](checkpoint=path)
+    model = model.to(dtype).to(device).eval()
+    logger.info("[MEC] HQ-SAM loaded: %s (%s)", vit_type, device)
+    return {"model": model, "model_type": vit_type}
+
+
+def _load_groundingdino(path: str, reg: dict, dtype: torch.dtype, device: str):
+    """Load GroundingDINO model for text-to-bounding-box grounding."""
+    _gdino_pkg = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "GroundingDINO",
+    )
+    import sys
+    if _gdino_pkg not in sys.path and os.path.isdir(_gdino_pkg):
+        sys.path.insert(0, _gdino_pkg)
+
+    try:
+        from groundingdino.util.inference import load_model as gdino_load_model
+    except ImportError:
+        try:
+            from GroundingDINO.groundingdino.util.inference import load_model as gdino_load_model
+        except ImportError:
+            raise RuntimeError(
+                "groundingdino package required for text prompt masking.\n"
+                "  pip install groundingdino-py"
+            )
+
+    # Resolve config file for the variant
+    version = reg.get("version", "swint")
+    config_name = (
+        "GroundingDINO_SwinT_OGC.py" if version == "swint"
+        else "GroundingDINO_SwinB_cfg.py"
+    )
+    # Try to find config in common locations
+    config_candidates = [
+        os.path.join(_gdino_pkg, "groundingdino", "config", config_name),
+        os.path.join(os.path.dirname(path), config_name),
+    ]
+    # Also try installed package config
+    try:
+        import groundingdino
+        pkg_dir = os.path.dirname(groundingdino.__file__)
+        config_candidates.append(os.path.join(pkg_dir, "config", config_name))
+    except (ImportError, AttributeError):
+        pass
+
+    config_path = None
+    for c in config_candidates:
+        if os.path.isfile(c):
+            config_path = c
+            break
+
+    if config_path is None:
+        raise RuntimeError(
+            f"GroundingDINO config '{config_name}' not found.\n"
+            f"Searched: {config_candidates}"
+        )
+
+    model = gdino_load_model(config_path, path, device=device)
+    model = model.eval()
+    logger.info("[MEC] GroundingDINO loaded: %s (%s)", version, device)
+    return {"model": model, "version": version, "device": device}
+
+
+def _load_rvm(path: str, reg: dict, dtype: torch.dtype, device: str):
+    """Load RobustVideoMatting model."""
+    _rvm_pkg = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "RobustVideoMatting",
+    )
+    import sys
+    if _rvm_pkg not in sys.path and os.path.isdir(_rvm_pkg):
+        sys.path.insert(0, _rvm_pkg)
+
+    try:
+        from model import MattingNetwork
+    except ImportError:
+        raise RuntimeError(
+            "RobustVideoMatting model module not found.\n"
+            "Ensure third_party/RobustVideoMatting is present."
+        )
+
+    variant = reg.get("version", "mobilenetv3")
+    model = MattingNetwork(variant)
+    sd = torch.load(path, map_location="cpu", weights_only=True)
+    model.load_state_dict(sd)
+    model = model.to(dtype).to(device).eval()
+    logger.info("[MEC] RVM loaded: %s (%s)", variant, device)
+    return {"model": model, "variant": variant}
+
+
+def _load_cutie(path: str, reg: dict, dtype: torch.dtype, device: str):
+    """Load CutIE (video object segmentation) model."""
+    _cutie_pkg = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "Cutie",
+    )
+    import sys
+    if _cutie_pkg not in sys.path and os.path.isdir(_cutie_pkg):
+        sys.path.insert(0, _cutie_pkg)
+
+    try:
+        from cutie.model.cutie import CUTIE
+        from cutie.inference.inference_core import InferenceCore as CutieInferenceCore
+        from omegaconf import open_dict
+        from hydra import compose, initialize_config_dir
+    except ImportError:
+        raise RuntimeError(
+            "Cutie package required. Ensure third_party/Cutie is present.\n"
+            "  pip install hydra-core omegaconf"
+        )
+
+    config_dir = os.path.join(_cutie_pkg, "cutie", "config")
+    with initialize_config_dir(config_path=config_dir, version_base="1.1"):
+        cfg = compose(config_name="eval_config.yaml")
+
+    with open_dict(cfg):
+        cfg.weights = path
+
+    cutie = CUTIE(cfg).to(device).eval()
+    sd = torch.load(path, map_location=device, weights_only=True)
+    cutie.load_weights(sd)
+    processor = CutieInferenceCore(cutie, cfg=cfg)
+    logger.info("[MEC] CutIE loaded: %s (%s)", reg.get("version"), device)
+    return {"processor": processor, "model": cutie}

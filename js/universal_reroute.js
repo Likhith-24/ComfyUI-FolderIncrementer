@@ -1,414 +1,362 @@
-import { app } from "../../scripts/app.js";
-
 /**
- * Universal Reroute ("Dot") Node — Nuke-style bundle rerouter for ComfyUI
+ * Universal Reroute ("Dot") Node — MEC dynamic rerouter for ComfyUI
+ *
+ * Virtual node: strips itself from the backend prompt so it never
+ * causes "Required input is missing" errors.
  *
  * Features:
- *   - Drop onto ANY connection (IMAGE, LATENT, INT, STRING, etc.)
- *   - Automatically intercepts and passes through without type restrictions
- *   - Handles multiple connections: drop onto a bundle of wires to reroute all
- *   - Each connection keeps its original link color
- *   - Right-click → "Remove Reroute (reconnect)" to dissolve and restore direct connections
- *   - Minimal visual footprint — small dot node like Nuke
- *   - Double-click to toggle label visibility
- *   - Shift+drag from the dot to split off a new branch
+ *   - Drop onto ANY connection → auto-adapts slot types
+ *   - Compact circle with web-strand accents (lightweight canvas only)
+ *   - Bundle drop: intercept nearby wires on placement
+ *   - Right-click → "Remove Reroute (reconnect)" to dissolve
+ *   - Double-click to toggle type label
+ *   - Zero GPU cost — pure Canvas2D rendering
  */
 
-const DOT_RADIUS  = 12;
-const DOT_COLOR   = "#888";
-const DOT_BG      = "#1e1e2e";
-const DOT_BORDER  = "#585b70";
-const DOT_HOVER   = "#a6adc8";
-const TITLE_COLOR  = "#bac2de";
-const NODE_TYPE   = "UniversalRerouteMEC";
+import { app } from "../../scripts/app.js";
 
-// ── Type color map (matches ComfyUI defaults) ────────────────────────
+const NODE_TYPE   = "UniversalRerouteMEC";
+const NODE_WIDTH  = 40;
+const NODE_HEIGHT = 30;
+const DOT_RADIUS  = 9;
+const HIT_RADIUS  = 100;
+
+// ── Type → color (matches ComfyUI link palette) ─────────────────────
 const TYPE_COLORS = {
-  IMAGE:      "#64b5f6",
-  LATENT:     "#ff6e9c",
-  MASK:       "#81c784",
-  MODEL:      "#b39ddb",
-  CLIP:       "#ffd54f",
-  VAE:        "#4dd0e1",
+  IMAGE:        "#64b5f6",
+  LATENT:       "#ff6e9c",
+  MASK:         "#81c784",
+  MODEL:        "#b39ddb",
+  CLIP:         "#ffd54f",
+  VAE:          "#4dd0e1",
   CONDITIONING: "#ffa726",
-  INT:        "#a1c4fd",
-  FLOAT:      "#a1c4fd",
-  STRING:     "#c5e1a5",
-  BOOLEAN:    "#ce93d8",
-  COMBO:      "#90a4ae",
-  BBOX:       "#ef9a9a",
-  SAM_MODEL:  "#b39ddb",
-  CONTROL_NET:"#4db6ac",
-  "*":        "#999",
+  INT:          "#a1c4fd",
+  FLOAT:        "#a1c4fd",
+  STRING:       "#c5e1a5",
+  BOOLEAN:      "#ce93d8",
+  COMBO:        "#90a4ae",
+  BBOX:         "#ef9a9a",
+  SAM_MODEL:    "#b39ddb",
+  CONTROL_NET:  "#4db6ac",
+  SEC_MODEL:    "#e57373",
+  SAM2MODEL:    "#b39ddb",
+  "*":          "#888",
 };
 
-function getTypeColor(type) {
-  if (!type) return DOT_COLOR;
-  return TYPE_COLORS[type] || DOT_COLOR;
-}
+function typeColor(t) { return TYPE_COLORS[t] || TYPE_COLORS["*"]; }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  Register Extension
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 app.registerExtension({
   name: "MEC.UniversalReroute",
 
-  // ── Register backend node modifications ──────────────────────────
-  beforeRegisterNodeDef(nodeType, nodeData, _app) {
+  // ── Backend node hooks ─────────────────────────────────────────────
+  beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== NODE_TYPE) return;
-
-    // Accept ANY type on input
-    nodeType.prototype.onConnectInput = function (_inputIndex, _outputType) {
-      return true;
-    };
-
-    // Accept ANY type on output
-    nodeType.prototype.onConnectOutput = function (_outputIndex, _inputType) {
-      return true;
-    };
+    nodeType.prototype.onConnectInput  = () => true;
+    nodeType.prototype.onConnectOutput = () => true;
   },
 
-  // ── Customize node after creation ────────────────────────────────
+  // ── Per-instance setup ─────────────────────────────────────────────
   nodeCreated(node) {
     if (node.comfyClass !== NODE_TYPE) return;
 
-    // Compact dot appearance
-    node.setSize([50, 30]);
-    node.color   = DOT_BG;
-    node.bgcolor = DOT_BG;
+    node.setSize([NODE_WIDTH, NODE_HEIGHT]);
+    node.color   = "#1a1a2e";
+    node.bgcolor = "#1a1a2e";
     node.shape   = LiteGraph.BOX_SHAPE;
-    node.flags   = node.flags || {};
+    node.serialize_widgets = false;
+    node.isVirtualNode = true;
 
-    // Store pass-through slot data
     if (!node.properties) node.properties = {};
-    if (!node.properties._slotTypes) node.properties._slotTypes = {};
     node.properties.showLabel = false;
 
-    // ── Connection change: match input/output types ────────────────
-    const origConnChange = node.onConnectionsChange;
-    node.onConnectionsChange = function (side, slotIndex, connected, linkInfo) {
-      origConnChange?.apply(this, arguments);
+    // ── Slot type adaptation ─────────────────────────────────────────
+    const origCC = node.onConnectionsChange;
+    node.onConnectionsChange = function (side, _idx, connected, linkInfo) {
+      origCC?.apply(this, arguments);
       if (!linkInfo) return;
-
-      const graph = this.graph || app.graph;
-      if (!graph) return;
-      const link = graph.links?.[linkInfo.id];
+      const g = this.graph || app.graph;
+      if (!g) return;
+      const link = g.links?.[linkInfo.id ?? linkInfo];
       if (!link) return;
 
-      // Determine the resolved type from the connection
-      let resolvedType = null;
-
+      let resolved = null;
       if (side === LiteGraph.INPUT && connected) {
-        // Something connected to our input → get the source output type
-        const srcNode = graph.getNodeById(link.origin_id);
-        if (srcNode) {
-          const srcSlot = srcNode.outputs?.[link.origin_slot];
-          resolvedType = srcSlot?.type || "*";
-        }
+        const src = g.getNodeById(link.origin_id);
+        resolved = src?.outputs?.[link.origin_slot]?.type || "*";
       } else if (side === LiteGraph.OUTPUT && connected) {
-        // Something connected to our output → get the target input type
-        const tgtNode = graph.getNodeById(link.target_id);
-        if (tgtNode) {
-          const tgtSlot = tgtNode.inputs?.[link.target_slot];
-          resolvedType = tgtSlot?.type || "*";
-        }
+        const tgt = g.getNodeById(link.target_id);
+        resolved = tgt?.inputs?.[link.target_slot]?.type || "*";
       }
 
-      // If we resolved a concrete type, update our slots to match
-      if (resolvedType && resolvedType !== "*") {
-        if (this.inputs?.[0]) {
-          this.inputs[0].type = resolvedType;
-          this.inputs[0].name = resolvedType;
-        }
-        if (this.outputs?.[0]) {
-          this.outputs[0].type = resolvedType;
-          this.outputs[0].name = resolvedType;
-        }
-        this.properties._slotTypes[0] = resolvedType;
+      if (resolved && resolved !== "*") {
+        if (this.inputs?.[0])  { this.inputs[0].type = resolved;  this.inputs[0].name = ""; }
+        if (this.outputs?.[0]) { this.outputs[0].type = resolved; this.outputs[0].name = ""; }
       }
 
-      // If disconnected and nothing else connected, reset to wildcard
       if (!connected) {
-        const hasInput = this.inputs?.[0]?.link != null;
-        const hasOutput = this.outputs?.[0]?.links?.length > 0;
-        if (!hasInput && !hasOutput) {
-          if (this.inputs?.[0]) {
-            this.inputs[0].type = "*";
-            this.inputs[0].name = "any";
-          }
-          if (this.outputs?.[0]) {
-            this.outputs[0].type = "*";
-            this.outputs[0].name = "any";
-          }
+        const hasIn  = this.inputs?.[0]?.link != null;
+        const hasOut = this.outputs?.[0]?.links?.length > 0;
+        if (!hasIn && !hasOut) {
+          if (this.inputs?.[0])  { this.inputs[0].type = "*"; this.inputs[0].name = ""; }
+          if (this.outputs?.[0]) { this.outputs[0].type = "*"; this.outputs[0].name = ""; }
         }
       }
-
       this.setDirtyCanvas?.(true, true);
     };
 
-    // ── Custom draw: small dot with colored ring ───────────────────
-    const origDrawFg = node.onDrawForeground;
+    // ── Draw: compact circle with web-strand accents ─────────────────
     node.onDrawForeground = function (ctx) {
-      origDrawFg?.apply(this, arguments);
-
-      const type = this.inputs?.[0]?.type || this.outputs?.[0]?.type || "*";
-      const color = getTypeColor(type);
-
-      // Draw the dot
+      const t = this.inputs?.[0]?.type || this.outputs?.[0]?.type || "*";
+      const c = typeColor(t);
       const cx = this.size[0] / 2;
       const cy = this.size[1] / 2;
+      const r  = DOT_RADIUS;
 
+      // Outer ring
       ctx.beginPath();
-      ctx.arc(cx, cy, DOT_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = DOT_BG;
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = "#16213e";
       ctx.fill();
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = c;
       ctx.stroke();
 
-      // Inner filled circle
+      // Inner dot
       ctx.beginPath();
-      ctx.arc(cx, cy, DOT_RADIUS * 0.4, 0, Math.PI * 2);
-      ctx.fillStyle = color;
+      ctx.arc(cx, cy, r * 0.35, 0, Math.PI * 2);
+      ctx.fillStyle = c;
       ctx.fill();
 
-      // Type label if enabled
-      if (this.properties.showLabel && type !== "*") {
-        ctx.font = "9px Inter, system-ui, sans-serif";
-        ctx.fillStyle = TITLE_COLOR;
+      // Web strands — 6 thin lines radiating from center (very lightweight)
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = c;
+      ctx.lineWidth = 0.7;
+      for (let i = 0; i < 6; i++) {
+        const angle = (Math.PI * 2 * i) / 6;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(angle) * r * 0.4, cy + Math.sin(angle) * r * 0.4);
+        ctx.lineTo(cx + Math.cos(angle) * r * 0.9, cy + Math.sin(angle) * r * 0.9);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Type label
+      if (this.properties.showLabel && t !== "*") {
+        ctx.font = "8px Inter, system-ui, sans-serif";
+        ctx.fillStyle = "#bac2de";
         ctx.textAlign = "center";
-        ctx.fillText(type, cx, cy + DOT_RADIUS + 12);
+        ctx.fillText(t, cx, cy + r + 11);
       }
     };
 
-    // ── Double-click to toggle label ───────────────────────────────
-    const origDblClick = node.onDblClick;
+    // ── Double-click → toggle label ──────────────────────────────────
+    const origDbl = node.onDblClick;
     node.onDblClick = function () {
-      origDblClick?.apply(this, arguments);
+      origDbl?.apply(this, arguments);
       this.properties.showLabel = !this.properties.showLabel;
       this.setDirtyCanvas?.(true, true);
     };
 
-    // ── Context menu: add "Remove Reroute (reconnect)" ─────────────
-    const origGetMenu = node.getExtraMenuOptions;
-    node.getExtraMenuOptions = function (canvas, options) {
-      origGetMenu?.apply(this, arguments);
-
-      options.unshift({
-        content: "Remove Reroute (reconnect)",
-        callback: () => {
-          _dissolveReroute(this);
+    // ── Context menu ─────────────────────────────────────────────────
+    const origMenu = node.getExtraMenuOptions;
+    node.getExtraMenuOptions = function (_canvas, options) {
+      origMenu?.apply(this, arguments);
+      options.unshift(
+        {
+          content: "Remove Reroute (reconnect)",
+          callback: () => dissolveReroute(this),
         },
-      });
-
-      options.unshift({
-        content: this.properties.showLabel ? "Hide Type Label" : "Show Type Label",
-        callback: () => {
-          this.properties.showLabel = !this.properties.showLabel;
-          this.setDirtyCanvas?.(true, true);
+        {
+          content: this.properties.showLabel ? "Hide Type Label" : "Show Type Label",
+          callback: () => {
+            this.properties.showLabel = !this.properties.showLabel;
+            this.setDirtyCanvas?.(true, true);
+          },
         },
-      });
+      );
     };
   },
 
-  // ── Setup: register canvas-level handlers for bundle drop ────────
+  // ── Canvas-level setup ─────────────────────────────────────────────
   setup() {
-    _registerBundleDrop();
+    // Strip from prompt before execution
+    const origGTP = app.graphToPrompt?.bind(app);
+    if (origGTP) {
+      app.graphToPrompt = async function () {
+        const p = await origGTP();
+        if (p?.output) {
+          for (const k of Object.keys(p.output)) {
+            if (p.output[k]?.class_type === NODE_TYPE) delete p.output[k];
+          }
+        }
+        return p;
+      };
+    }
+
+    // Bundle-drop on move
+    const origMoved = app.canvas?.onNodeMoved?.bind(app.canvas);
+    if (app.canvas) {
+      app.canvas.onNodeMoved = function (node) {
+        origMoved?.(node);
+        if (node?.comfyClass === NODE_TYPE && !node._mecWired) tryWireOnDrop(node);
+      };
+    }
+
+    // Right-click canvas → "Insert Reroute (MEC)"
+    const origCanvasMenu = LGraphCanvas.prototype.getCanvasMenuOptions;
+    if (origCanvasMenu) {
+      LGraphCanvas.prototype.getCanvasMenuOptions = function () {
+        const opts = origCanvasMenu.apply(this, arguments);
+        opts.push(null, {
+          content: "Insert Reroute (MEC)",
+          callback: () => insertRerouteAtMouse(this),
+        });
+        return opts;
+      };
+    }
   },
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  Dissolve reroute: reconnect inputs→outputs and remove node
+//  Dissolve — reconnect source → targets, remove the dot
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function _dissolveReroute(node) {
-  const graph = node.graph || app.graph;
-  if (!graph) return;
+function dissolveReroute(node) {
+  const g = node.graph || app.graph;
+  if (!g) return;
 
-  // Gather source info (who feeds our input)
-  const inputLink = node.inputs?.[0]?.link;
-  let srcNodeId = null, srcSlot = null;
-
-  if (inputLink != null) {
-    const link = graph.links?.[inputLink];
-    if (link) {
-      srcNodeId = link.origin_id;
-      srcSlot   = link.origin_slot;
-    }
+  const inLink = node.inputs?.[0]?.link;
+  let srcId = null, srcSlot = null;
+  if (inLink != null) {
+    const lk = g.links?.[inLink];
+    if (lk) { srcId = lk.origin_id; srcSlot = lk.origin_slot; }
   }
 
-  // Gather all downstream connections (our output → targets)
   const targets = [];
-  const outLinks = node.outputs?.[0]?.links || [];
-  for (const lid of outLinks) {
-    const link = graph.links?.[lid];
-    if (link) {
-      targets.push({ nodeId: link.target_id, slot: link.target_slot });
-    }
+  for (const lid of (node.outputs?.[0]?.links || [])) {
+    const lk = g.links?.[lid];
+    if (lk) targets.push({ id: lk.target_id, slot: lk.target_slot });
   }
 
-  // Disconnect everything from this node
   node.disconnectInput(0);
   node.disconnectOutput(0);
 
-  // Reconnect source → each target directly
-  if (srcNodeId != null && srcSlot != null) {
-    const srcNode = graph.getNodeById(srcNodeId);
-    if (srcNode) {
-      for (const tgt of targets) {
-        const tgtNode = graph.getNodeById(tgt.nodeId);
-        if (tgtNode) {
-          srcNode.connect(srcSlot, tgtNode, tgt.slot);
-        }
+  if (srcId != null) {
+    const src = g.getNodeById(srcId);
+    if (src) {
+      for (const t of targets) {
+        const tgt = g.getNodeById(t.id);
+        if (tgt) forceConnect(g, src, srcSlot, tgt, t.slot);
       }
     }
   }
-
-  // Remove the reroute node
-  graph.remove(node);
-  graph.setDirtyCanvas?.(true, true);
+  g.remove(node);
+  g.setDirtyCanvas?.(true, true);
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  Bundle drop: intercept link being dragged over canvas and offer
-//  to insert a reroute node at that position
+//  Wire-on-drop — insert into nearby link when node is placed
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function _registerBundleDrop() {
-  // We add a canvas menu entry for "Insert Reroute Here"
-  // that creates a UniversalRerouteMEC at the click position
-  // and wires it into any selected links
+function tryWireOnDrop(node) {
+  const g = app.graph;
+  if (!g) return;
+  node._mecWired = true;
 
-  const origProcessMenu = LGraphCanvas.prototype.getCanvasMenuOptions;
-  if (!origProcessMenu) return;
+  const gx = node.pos[0] + NODE_WIDTH / 2;
+  const gy = node.pos[1] + NODE_HEIGHT / 2;
+  const hits = linksNearPoint(g, gx, gy, node.id);
+  if (!hits.length) return;
 
-  LGraphCanvas.prototype.getCanvasMenuOptions = function () {
-    const options = origProcessMenu.apply(this, arguments);
+  const h = hits[0];
+  const srcNode = g.getNodeById(h.link.origin_id);
+  const tgtNode = g.getNodeById(h.link.target_id);
+  if (!srcNode || !tgtNode) return;
 
-    options.push(null); // separator
-    options.push({
-      content: "Insert Reroute (MEC)",
-      callback: () => {
-        _insertRerouteAtMouse(this);
-      },
-    });
+  const srcType = srcNode.outputs?.[h.link.origin_slot]?.type || "*";
+  if (node.inputs?.[0])  node.inputs[0].type = srcType;
+  if (node.outputs?.[0]) node.outputs[0].type = srcType;
 
-    return options;
-  };
+  g.removeLink(h.link.id);
+  forceConnect(g, srcNode, h.link.origin_slot, node, 0);
+  forceConnect(g, node, 0, tgtNode, h.link.target_slot);
+  g.setDirtyCanvas(true, true);
 }
 
-function _insertRerouteAtMouse(graphCanvas) {
-  const graph = graphCanvas.graph || app.graph;
-  if (!graph) return;
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Insert Reroute at mouse position
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  // Get mouse position in graph space
-  const pos = graphCanvas.canvas_mouse || graphCanvas.last_mouse_position;
+function insertRerouteAtMouse(canvas) {
+  const g = canvas.graph || app.graph;
+  if (!g) return;
+
+  const pos = canvas.canvas_mouse || canvas.last_mouse_position;
   if (!pos) return;
-  const graphPos = graphCanvas.convertEventToCanvasOffset({ clientX: pos[0], clientY: pos[1] });
-  const gx = graphPos[0] || pos[0];
-  const gy = graphPos[1] || pos[1];
+  const gp = canvas.convertEventToCanvasOffset({ clientX: pos[0], clientY: pos[1] });
+  const gx = gp[0] || pos[0], gy = gp[1] || pos[1];
 
-  // Find links near this position
-  const nearLinks = _findLinksNearPoint(graph, graphCanvas, gx, gy, 40);
+  const near = linksNearPoint(g, gx, gy, -1);
+  const rr = LiteGraph.createNode(NODE_TYPE);
+  if (!rr) return;
+  rr.pos = [gx - NODE_WIDTH / 2, gy - NODE_HEIGHT / 2];
+  g.add(rr);
 
-  if (nearLinks.length === 0) {
-    // Just create a standalone reroute
-    _createRerouteNode(graph, gx, gy);
-    return;
-  }
-
-  // For each nearby link, insert a reroute
-  for (const linkInfo of nearLinks) {
-    const reroute = _createRerouteNode(graph, gx, gy + linkInfo.index * 40);
-    if (!reroute) continue;
-
-    const srcNode = graph.getNodeById(linkInfo.srcId);
-    const tgtNode = graph.getNodeById(linkInfo.tgtId);
-    if (!srcNode || !tgtNode) continue;
-
-    // Set the reroute slot types to match this link
-    const linkType = linkInfo.type || "*";
-    if (reroute.inputs?.[0]) {
-      reroute.inputs[0].type = linkType;
-      reroute.inputs[0].name = linkType;
-    }
-    if (reroute.outputs?.[0]) {
-      reroute.outputs[0].type = linkType;
-      reroute.outputs[0].name = linkType;
-    }
-
-    // Disconnect original link
-    tgtNode.disconnectInput(linkInfo.tgtSlot);
-
-    // Wire: source → reroute → target
-    srcNode.connect(linkInfo.srcSlot, reroute, 0);
-    reroute.connect(0, tgtNode, linkInfo.tgtSlot);
-  }
-
-  graph.setDirtyCanvas?.(true, true);
-}
-
-function _createRerouteNode(graph, x, y) {
-  const node = LiteGraph.createNode(NODE_TYPE);
-  if (!node) return null;
-  node.pos = [x - 25, y - 15];
-  graph.add(node);
-  return node;
-}
-
-function _findLinksNearPoint(graph, graphCanvas, gx, gy, threshold) {
-  const found = [];
-  if (!graph.links) return found;
-
-  let idx = 0;
-  for (const linkId in graph.links) {
-    const link = graph.links[linkId];
-    if (!link) continue;
-
-    const srcNode = graph.getNodeById(link.origin_id);
-    const tgtNode = graph.getNodeById(link.target_id);
-    if (!srcNode || !tgtNode) continue;
-
-    // Get the start/end positions of this link
-    const srcSlot = srcNode.getOutputInfo?.(link.origin_slot);
-    const tgtSlot = tgtNode.getInputInfo?.(link.target_slot);
-    if (!srcSlot || !tgtSlot) continue;
-
-    const srcPos = srcNode.getConnectionPos?.(false, link.origin_slot);
-    const tgtPos = tgtNode.getConnectionPos?.(true, link.target_slot);
-    if (!srcPos || !tgtPos) continue;
-
-    // Simple point-to-segment distance check
-    const dist = _pointToSegmentDist(gx, gy, srcPos[0], srcPos[1], tgtPos[0], tgtPos[1]);
-    if (dist < threshold) {
-      found.push({
-        linkId:  Number(linkId),
-        srcId:   link.origin_id,
-        srcSlot: link.origin_slot,
-        tgtId:   link.target_id,
-        tgtSlot: link.target_slot,
-        type:    link.type || srcSlot.type || "*",
-        dist,
-        index:   idx++,
-      });
+  if (near.length) {
+    const h = near[0];
+    const sn = g.getNodeById(h.link.origin_id);
+    const tn = g.getNodeById(h.link.target_id);
+    if (sn && tn) {
+      const sType = sn.outputs?.[h.link.origin_slot]?.type || "*";
+      if (rr.inputs?.[0])  rr.inputs[0].type = sType;
+      if (rr.outputs?.[0]) rr.outputs[0].type = sType;
+      g.removeLink(h.link.id);
+      forceConnect(g, sn, h.link.origin_slot, rr, 0);
+      forceConnect(g, rr, 0, tn, h.link.target_slot);
     }
   }
-
-  // Sort by distance so closest links get rerouted first
-  found.sort((a, b) => a.dist - b.dist);
-  return found;
+  g.setDirtyCanvas?.(true, true);
 }
 
-function _pointToSegmentDist(px, py, ax, ay, bx, by) {
-  const dx = bx - ax;
-  const dy = by - ay;
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  Geometry helpers
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function forceConnect(graph, srcNode, srcSlot, dstNode, dstSlot) {
+  const sOut = srcNode.outputs?.[srcSlot];
+  const dIn  = dstNode.inputs?.[dstSlot];
+  if (!sOut || !dIn) return;
+  const oldS = sOut.type, oldD = dIn.type;
+  sOut.type = "*"; dIn.type = "*";
+  srcNode.connect(srcSlot, dstNode, dstSlot);
+  sOut.type = oldS; dIn.type = oldD;
+}
+
+function linksNearPoint(graph, gx, gy, excludeId) {
+  const hits = [];
+  for (const lid in graph.links) {
+    const lk = graph.links[lid];
+    if (!lk) continue;
+    if (lk.origin_id === excludeId || lk.target_id === excludeId) continue;
+    const sn = graph.getNodeById(lk.origin_id);
+    const tn = graph.getNodeById(lk.target_id);
+    if (!sn || !tn) continue;
+    const sp = sn.getConnectionPos(false, lk.origin_slot);
+    const tp = tn.getConnectionPos(true,  lk.target_slot);
+    if (!sp || !tp) continue;
+    const d = ptSegDist(gx, gy, sp[0], sp[1], tp[0], tp[1]);
+    if (d <= HIT_RADIUS) hits.push({ link: lk, dist: d });
+  }
+  hits.sort((a, b) => a.dist - b.dist);
+  return hits;
+}
+
+function ptSegDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
   const lenSq = dx * dx + dy * dy;
   if (lenSq === 0) return Math.hypot(px - ax, py - ay);
-
-  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
-  t = Math.max(0, Math.min(1, t));
-  const cx = ax + t * dx;
-  const cy = ay + t * dy;
-  return Math.hypot(px - cx, py - cy);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }

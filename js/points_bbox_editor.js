@@ -159,37 +159,45 @@ class PointsBBoxEditor {
     // ── Load reference image ─────────────────────────────────────────
     loadRefImage(imageUrl, overrideWidth, overrideHeight) {
         if (!imageUrl) return;
-        // For data: URLs, compare by dimensions only (base64 content changes each execution)
         const isDataUrl = imageUrl.startsWith("data:");
-        const sameUrl = isDataUrl
-            ? (this._refLoaded && this._canvasW === (overrideWidth || 0) && this._canvasH === (overrideHeight || 0))
-            : (imageUrl === this._lastRefUrl);
-        if (sameUrl && this._refLoaded) return;
+
+        // For non-data URLs, skip if same URL and already loaded
+        if (!isDataUrl && imageUrl === this._lastRefUrl && this._refLoaded) return;
+
         this._lastRefUrl = isDataUrl ? "__data_url__" : imageUrl;
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
             this._refImage  = img;
             this._refLoaded = true;
-            // Use override dimensions if provided (for downscaled previews from Python)
-            this._canvasW   = overrideWidth  || img.naturalWidth;
-            this._canvasH   = overrideHeight || img.naturalHeight;
+            const newW = overrideWidth  || img.naturalWidth;
+            const newH = overrideHeight || img.naturalHeight;
+            const dimsChanged = (newW !== this._canvasW || newH !== this._canvasH);
+            this._canvasW = newW;
+            this._canvasH = newH;
             const wW = this.node.widgets?.find(w => w.name === "width");
             const hW = this.node.widgets?.find(w => w.name === "height");
             if (wW) wW.value = this._canvasW;
             if (hW) hW.value = this._canvasH;
-            // Notify registration code to update widget/node sizing
-            this._onImageLoaded?.();
-            // Only auto-fit on first image load — preserve user's zoom/pan after that
+            // Only resize node when canvas dimensions actually changed
+            if (dimsChanged) {
+                this._onImageLoaded?.();
+            }
+            // Auto-fit only on first image load — preserve user's zoom/pan after that
             if (!this._hasAutoFitted) {
                 this._hasAutoFitted = true;
-                setTimeout(() => {
+                // Double-pass: first after layout settles, second as safety net
+                const doFit = () => {
                     if (this._containerEl) {
                         const r = this._containerEl.getBoundingClientRect();
                         if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
                     }
                     this.node._mecRender?.();
-                }, 150);
+                };
+                requestAnimationFrame(() => {
+                    doFit();
+                    setTimeout(doFit, 300);
+                });
             } else {
                 this.node._mecRender?.();
             }
@@ -200,7 +208,7 @@ class PointsBBoxEditor {
 
     fitView(containerW, containerH) {
         if (this._canvasW <= 0 || this._canvasH <= 0) return;
-        this.zoom = Math.min(containerW / this._canvasW, containerH / this._canvasH) * 0.92;
+        this.zoom = Math.min(containerW / this._canvasW, containerH / this._canvasH) * 0.96;
         this.panX = (containerW - this._canvasW * this.zoom) / 2;
         this.panY = (containerH - this._canvasH * this.zoom) / 2;
     }
@@ -580,7 +588,8 @@ app.registerExtension({
         });
         const ctx = canvas.getContext("2d");
 
-        // ── Size update callback (called when reference image loads or dims change)
+        // ── Size update callback (called when reference image loads with NEW dims)
+        let _prevSizeKey = "";
         function updateEditorSize() {
             const imgW = editor._canvasW;
             const imgH = editor._canvasH;
@@ -589,9 +598,15 @@ app.registerExtension({
             const availW = Math.max(200, nodeW - 40);
             const scale  = Math.min(1.0, availW / imgW);
             const displayH = Math.round(imgH * scale) + TOOLBAR_H + 24;
-            _editorHeight = Math.max(350, Math.min(displayH, 700));
-            const totalH = _editorHeight + 280;
-            node.setSize([Math.max(nodeW, Math.min(imgW + 40, 800)), totalH]);
+            const newEditorH = Math.max(350, Math.min(displayH, 700));
+            const totalH = newEditorH + 280;
+            const newW = Math.max(nodeW, Math.min(imgW + 40, 800));
+            const sizeKey = `${newW}x${totalH}`;
+            // Only resize if the computed size actually differs
+            if (sizeKey === _prevSizeKey) return;
+            _prevSizeKey = sizeKey;
+            _editorHeight = newEditorH;
+            node.setSize([newW, totalH]);
             if (node.graph) node.graph.setDirtyCanvas(true, true);
         }
         editor._onImageLoaded = updateEditorSize;

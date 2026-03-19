@@ -1,47 +1,43 @@
 """
-UniversalRerouteMEC — Nuke-style "Dot" pass-through node.
+UniversalRerouteMEC — Dynamic reroute / Dot node.
 
-Accepts any data type on input and passes it through unchanged.
-The JS companion (js/universal_reroute.js) provides:
-  - Compact dot rendering with colored ring matching the data type
-  - Bundle-drop: insert into multiple wires at once
-  - Right-click → "Remove Reroute (reconnect)" to dissolve
-  - Double-click to toggle type label
+A virtual-style pass-through that accepts ANY data type.
+The JS companion (js/universal_reroute.js) renders a compact circle,
+auto-adapts slot types on connection, handles bundle-drop, and strips
+itself from the backend prompt when running as a virtual relay.
+
+Key design:
+  - VALIDATE_INPUTS always returns True → bypasses ComfyUI type checks
+  - passthrough() accepts anything=None → never errors on missing input
+  - JS sets isVirtualNode=True and strips from prompt before execution
 """
 
 from __future__ import annotations
 
-
-class _AnyType(str):
-    """Wildcard type that matches any ComfyUI data type."""
-
-    def __ne__(self, other):
-        return False
-
-
-_ANY = _AnyType("*")
+_AnyType = type("AnyType", (str,), {"__ne__": lambda self, other: False})
+ANY = _AnyType("*")
 
 
 class UniversalRerouteMEC:
-    """Pass-through node that accepts and forwards any connection type."""
+    """Dynamic reroute dot — accepts and forwards any connection type."""
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "any": (_ANY, {}),
-            },
-        }
+        return {"required": {"anything": (ANY, {})}}
 
-    RETURN_TYPES = (_ANY,)
-    RETURN_NAMES = ("any",)
+    @classmethod
+    def VALIDATE_INPUTS(cls, input_types):
+        return True
+
+    RETURN_TYPES = (ANY,)
+    RETURN_NAMES = ("output",)
     FUNCTION = "passthrough"
     CATEGORY = "MaskEditControl/Utils"
     DESCRIPTION = (
-        "Nuke-style Dot node. Drop onto any connection to reroute it. "
-        "Right-click → 'Remove Reroute (reconnect)' to dissolve. "
-        "Handles any data type (IMAGE, LATENT, MASK, STRING, etc.)."
+        "Drop onto any connection to reroute it. Compact dot shape. "
+        "Auto-adapts to IMAGE, LATENT, MASK, STRING, etc. "
+        "Right-click → 'Remove Reroute (reconnect)' to dissolve."
     )
 
-    def passthrough(self, any):
-        return (any,)
+    def passthrough(self, anything=None):
+        return (anything,)

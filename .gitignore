@@ -27,6 +27,7 @@ share/python-wheels/
 MANIFEST
 third_party/
 tasks/
+tests/
 autoresearch-nodepacks/
 
 # PyInstaller

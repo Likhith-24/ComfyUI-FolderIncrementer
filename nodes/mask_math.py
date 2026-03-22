@@ -63,7 +63,8 @@ class MaskMath:
             import torch.nn.functional as F
             kernel = torch.ones(1, 1, 3, 3, device=m.device)
             expanded = high_mask
-            for _ in range(int(max(m.shape[-2], m.shape[-1]) * 0.1)):
+            max_iters = min(500, int(max(m.shape[-2], m.shape[-1]) * 0.1))
+            for _ in range(max(1, max_iters)):
                 if expanded.dim() == 2:
                     expanded = expanded.unsqueeze(0).unsqueeze(0)
                 elif expanded.dim() == 3:

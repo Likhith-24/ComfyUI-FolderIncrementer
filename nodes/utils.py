@@ -737,9 +737,22 @@ def parse_bbox_input(bbox_json, bbox_input=None):
 #  Mask to BBox
 # ══════════════════════════════════════════════════════════════════════
 
-def mask_to_bbox(mask_t, W, H):
-    """Extract bounding box [x, y, w, h] from a mask tensor."""
-    coords = torch.nonzero(mask_t > 0.5, as_tuple=False)
+def mask_to_bbox(mask_t, W=None, H=None):
+    """Extract bounding box [x, y, w, h] from a mask tensor.
+
+    Args:
+        mask_t: float tensor (H, W) or (B, H, W)
+        W: fallback width (auto-detected from mask if None)
+        H: fallback height (auto-detected from mask if None)
+    """
+    m = mask_t
+    if m.dim() == 3:
+        m = m[0]
+    if H is None:
+        H = m.shape[0]
+    if W is None:
+        W = m.shape[1]
+    coords = torch.nonzero(m > 0.5, as_tuple=False)
     if coords.shape[0] > 0:
         y_min = int(coords[:, 0].min().item())
         y_max = int(coords[:, 0].max().item())

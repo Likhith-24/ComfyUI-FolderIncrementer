@@ -26,6 +26,7 @@ Return convention:
 
 from __future__ import annotations
 
+import gc
 import logging
 
 import numpy as np
@@ -314,6 +315,11 @@ class MattingNode:
         else:
             raise ValueError(f"Unknown matting backend: {actual_backend}")
 
+        # Free intermediate GPU memory for low-VRAM users
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Validate alpha
         alpha_mask = _validate_alpha(alpha_mask, B, H, W)
 
@@ -330,7 +336,8 @@ class MattingNode:
     def _run_vitmatte(self, image, mask, variant, edge_radius, trimap_in, B, H, W):
         from PIL import Image as PILImage
 
-        loaded = get_or_load_model(variant, precision="fp32", device="cuda")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        loaded = get_or_load_model(variant, precision="fp32", device=device)
         if isinstance(loaded, dict):
             model, processor = loaded["model"], loaded["processor"]
         else:

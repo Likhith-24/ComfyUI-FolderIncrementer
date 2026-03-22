@@ -8,6 +8,10 @@ requires-python = ">=3.10"
 [project.urls]
 Repository = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
 [tool.comfy]
 PublisherId = "likhith-24" # TODO (fill in Publisher ID from Comfy Registry Website).
 DisplayName = "ComfyUI-CustomNodePacks" # Display name for the Custom Node. Can be changed later.

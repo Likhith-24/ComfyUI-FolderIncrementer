@@ -1,15 +1,21 @@
 """
-Parameter Memory — Persistent parameter history tracking for ComfyUI.
+Parameter Memory v2 — Compact persistent parameter history for ComfyUI.
 
 Two components:
   1. ParameterHistoryMEC node: displays stored parameter history in the workflow
-  2. Server route /mec/param_history: receives snapshots from JS and stores in SQLite DB
+  2. Server route /mec/param_history: receives delta snapshots from JS, stores in SQLite
 
 The JS extension (js/parameter_memory.js) handles:
   - Real-time widget change interception on ALL nodes
-  - Pre-execution snapshots
+  - Pre-execution diff snapshots (only non-default values)
   - Hover tooltips (Alt+hover → see previous value & default)
-  - Right-click context menus (history, diff, reset to defaults)
+  - Right-click context menus (history, diff, reset, presets)
+
+v2 changes:
+  - DB stores one row per node per run (JSON diff blob) instead of one row per param
+  - Accepts delta-only payloads from JS (only changed-from-default params)
+  - Auto-prunes old runs beyond MAX_RUNS
+  - Cleaner grouped output formatting
 """
 
 from __future__ import annotations
@@ -18,10 +24,12 @@ import json
 import logging
 import os
 import sqlite3
-import time
 from datetime import datetime
 
 logger = logging.getLogger("MEC")
+
+# ── Config ────────────────────────────────────────────────────────────
+MAX_RUNS = 30  # auto-prune: keep only this many distinct runs
 
 # ── DB path lives next to this file ──────────────────────────────────
 _DB_PATH = os.path.join(os.path.dirname(__file__), "..", "param_history.db")
@@ -29,44 +37,58 @@ _DB_PATH = os.path.normpath(_DB_PATH)
 
 
 def _get_db():
-    """Get a thread-local SQLite connection with WAL mode."""
+    """Get a SQLite connection with WAL mode and v2 schema."""
     conn = sqlite3.connect(_DB_PATH, timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
+    # v2 schema: one row per node per run, delta JSON blob
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS param_snapshots (
+        CREATE TABLE IF NOT EXISTS param_diffs (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             ts         TEXT    NOT NULL,
             run_id     INTEGER NOT NULL,
             node_id    TEXT    NOT NULL,
             node_title TEXT    NOT NULL,
             node_class TEXT    NOT NULL,
-            param_name TEXT    NOT NULL,
-            param_value TEXT   NOT NULL
+            delta_json TEXT    NOT NULL
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_snapshots_run
-        ON param_snapshots(run_id)
+        CREATE INDEX IF NOT EXISTS idx_diffs_run
+        ON param_diffs(run_id)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_snapshots_node
-        ON param_snapshots(node_id, param_name)
+        CREATE INDEX IF NOT EXISTS idx_diffs_class
+        ON param_diffs(node_class)
     """)
     conn.commit()
     return conn
 
 
-def _store_snapshot(data: dict):
-    """Store a run snapshot into the DB.
+def _prune_old_runs(conn):
+    """Keep only the last MAX_RUNS distinct runs."""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT run_id FROM param_diffs ORDER BY run_id DESC"
+        ).fetchall()
+        if len(rows) > MAX_RUNS:
+            cutoff = rows[MAX_RUNS - 1][0]
+            conn.execute("DELETE FROM param_diffs WHERE run_id < ?", (cutoff,))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"[MEC] prune error: {e}")
 
-    data format (from JS):
+
+def _store_snapshot(data: dict):
+    """Store a run snapshot (delta format) into the DB.
+
+    data format from JS v2:
     {
-        "123": {
+        "node_id": {
             "title": "KSampler",
             "class": "KSampler",
             "run_id": 5,
             "ts": "2026-03-19 10:00:00",
-            "values": {"steps": 20, "cfg": 7.0, ...}
+            "delta": {"steps": 20, "cfg": 7.0}   // only non-default params
         },
         ...
     }
@@ -79,16 +101,20 @@ def _store_snapshot(data: dict):
             run_id = info.get("run_id", 0)
             title = info.get("title", "")
             cls = info.get("class", "")
-            values = info.get("values", {})
-            for k, v in values.items():
-                rows.append((ts, run_id, str(node_id), title, cls, k, json.dumps(v)))
+            # v2: accept "delta" field; fall back to "values" for backward compat
+            delta = info.get("delta", info.get("values", {}))
+            if not delta:
+                continue  # skip nodes with no changes from defaults
+            rows.append((ts, run_id, str(node_id), title, cls, json.dumps(delta)))
 
-        conn.executemany(
-            "INSERT INTO param_snapshots (ts, run_id, node_id, node_title, node_class, param_name, param_value) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
+        if rows:
+            conn.executemany(
+                "INSERT INTO param_diffs (ts, run_id, node_id, node_title, node_class, delta_json) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+            _prune_old_runs(conn)
         conn.close()
     except Exception as e:
         logger.warning(f"[MEC] param_history DB write error: {e}")
@@ -100,16 +126,16 @@ def _query_history(node_class: str = "", last_n_runs: int = 10) -> list[dict]:
         conn = _get_db()
         if node_class:
             rows = conn.execute(
-                "SELECT ts, run_id, node_id, node_title, node_class, param_name, param_value "
-                "FROM param_snapshots WHERE node_class = ? "
-                "ORDER BY id DESC LIMIT ?",
-                (node_class, last_n_runs * 50),
+                "SELECT ts, run_id, node_id, node_title, node_class, delta_json "
+                "FROM param_diffs WHERE node_class = ? "
+                "ORDER BY run_id DESC, id DESC LIMIT ?",
+                (node_class, last_n_runs * 20),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT ts, run_id, node_id, node_title, node_class, param_name, param_value "
-                "FROM param_snapshots ORDER BY id DESC LIMIT ?",
-                (last_n_runs * 50,),
+                "SELECT ts, run_id, node_id, node_title, node_class, delta_json "
+                "FROM param_diffs ORDER BY run_id DESC, id DESC LIMIT ?",
+                (last_n_runs * 20,),
             ).fetchall()
         conn.close()
 
@@ -118,7 +144,7 @@ def _query_history(node_class: str = "", last_n_runs: int = 10) -> list[dict]:
             results.append({
                 "ts": r[0], "run_id": r[1], "node_id": r[2],
                 "node_title": r[3], "node_class": r[4],
-                "param_name": r[5], "param_value": json.loads(r[6]),
+                "delta": json.loads(r[5]),
             })
         return results
     except Exception as e:
@@ -131,42 +157,43 @@ def _diff_runs(run_a: int, run_b: int) -> list[dict]:
     try:
         conn = _get_db()
 
-        def _get_run_params(rid):
+        def _get_run_deltas(rid):
             rows = conn.execute(
-                "SELECT node_id, node_title, node_class, param_name, param_value "
-                "FROM param_snapshots WHERE run_id = ?",
+                "SELECT node_id, node_title, node_class, delta_json "
+                "FROM param_diffs WHERE run_id = ?",
                 (rid,),
             ).fetchall()
-            params = {}
+            nodes = {}
             for r in rows:
-                key = f"{r[0]}:{r[3]}"  # node_id:param_name
-                params[key] = {
-                    "node_id": r[0], "node_title": r[1], "node_class": r[2],
-                    "param_name": r[3], "value": json.loads(r[4]),
+                nodes[r[0]] = {
+                    "node_id": r[0], "node_title": r[1],
+                    "node_class": r[2], "delta": json.loads(r[3]),
                 }
-            return params
+            return nodes
 
-        pa = _get_run_params(run_a)
-        pb = _get_run_params(run_b)
+        na = _get_run_deltas(run_a)
+        nb = _get_run_deltas(run_b)
         conn.close()
 
         diffs = []
-        all_keys = set(pa.keys()) | set(pb.keys())
-        for key in sorted(all_keys):
-            a = pa.get(key)
-            b = pb.get(key)
-            val_a = a["value"] if a else None
-            val_b = b["value"] if b else None
-            if val_a != val_b:
-                info = a or b
-                diffs.append({
-                    "node_id":    info["node_id"],
-                    "node_title": info["node_title"],
-                    "node_class": info["node_class"],
-                    "param_name": info["param_name"],
-                    "run_a":      val_a,
-                    "run_b":      val_b,
-                })
+        all_node_ids = set(na.keys()) | set(nb.keys())
+        for nid in sorted(all_node_ids):
+            da = na.get(nid, {}).get("delta", {})
+            db_ = nb.get(nid, {}).get("delta", {})
+            info = na.get(nid) or nb.get(nid)
+            all_params = set(da.keys()) | set(db_.keys())
+            for param in sorted(all_params):
+                va = da.get(param)
+                vb = db_.get(param)
+                if va != vb:
+                    diffs.append({
+                        "node_id":    info["node_id"],
+                        "node_title": info["node_title"],
+                        "node_class": info["node_class"],
+                        "param_name": param,
+                        "run_a":      va,
+                        "run_b":      vb,
+                    })
         return diffs
     except Exception as e:
         logger.warning(f"[MEC] param_history diff error: {e}")
@@ -248,27 +275,26 @@ class ParameterHistoryMEC:
                 runs[rid] = []
             runs[rid].append(r)
 
-        lines = ["═══ Parameter History ═══", ""]
+        lines = ["═══ Parameter History (deltas from defaults) ═══", ""]
         for rid in sorted(runs.keys(), reverse=True):
             entries = runs[rid]
             ts = entries[0]["ts"] if entries else "?"
             lines.append(f"── Run #{rid} ({ts}) ──")
             for e in entries:
-                lines.append(
-                    f"  {e['node_title']} ({e['node_class']}) → "
-                    f"{e['param_name']} = {e['param_value']}"
-                )
+                delta = e["delta"]
+                params = ", ".join(f"{k}={json.dumps(v)}" for k, v in delta.items())
+                lines.append(f"  {e['node_title']} ({e['node_class']})")
+                lines.append(f"    {params}")
             lines.append("")
 
         return ("\n".join(lines),)
 
     def _diff_mode(self, run_a, run_b):
         if run_a == 0 or run_b == 0:
-            # Auto-detect last two runs
             try:
                 conn = _get_db()
                 rids = conn.execute(
-                    "SELECT DISTINCT run_id FROM param_snapshots ORDER BY run_id DESC LIMIT 2"
+                    "SELECT DISTINCT run_id FROM param_diffs ORDER BY run_id DESC LIMIT 2"
                 ).fetchall()
                 conn.close()
                 if len(rids) < 2:
@@ -298,11 +324,12 @@ class ParameterHistoryMEC:
         if not rows:
             return (f"No history found for node class '{node_class}'.",)
 
-        lines = [f"═══ History for {node_class} ═══", ""]
+        lines = [f"═══ History for {node_class} (deltas) ═══", ""]
         for r in rows:
-            lines.append(
-                f"  Run #{r['run_id']} ({r['ts']}) → {r['param_name']} = {r['param_value']}"
-            )
+            delta = r["delta"]
+            params = ", ".join(f"{k}={json.dumps(v)}" for k, v in delta.items())
+            lines.append(f"  Run #{r['run_id']} ({r['ts']})")
+            lines.append(f"    {params}")
         return ("\n".join(lines),)
 
     @classmethod

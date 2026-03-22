@@ -49,12 +49,16 @@ class MaskPreviewOverlay:
                 bbox_color_r, bbox_color_g, bbox_color_b, bbox=None):
 
         B, H, W, C = image.shape
-        m = mask.clone()
+        m = mask.clone().to(image.device)
         if m.dim() == 2:
             m = m.unsqueeze(0)
         # Match batch
         if m.shape[0] < B:
-            m = m.expand(B, -1, -1).clone()
+            if m.shape[0] == 1:
+                m = m.expand(B, -1, -1).clone()
+            else:
+                repeats = (B + m.shape[0] - 1) // m.shape[0]
+                m = m.repeat(repeats, 1, 1)[:B]
         # Match spatial
         if m.shape[1] != H or m.shape[2] != W:
             m = F.interpolate(m.unsqueeze(1), size=(H, W),
@@ -67,8 +71,12 @@ class MaskPreviewOverlay:
 
         out = image.clone()
 
+        # Pre-allocate wider output for side_by_side mode
+        if display_mode == "side_by_side":
+            out = torch.zeros(B, H, W * 2, 3, device=image.device, dtype=image.dtype)
+
         for i in range(B):
-            frame = out[i]            # (H, W, C)
+            frame = image[i].clone()  # always read from original image
             mi = m[i]                 # (H, W)
 
             if display_mode == "overlay":
@@ -111,10 +119,6 @@ class MaskPreviewOverlay:
                     frame = self._draw_bbox(frame, box, bbox_clr, 2)
 
             if display_mode == "side_by_side":
-                # Need to handle differently – output is wider
-                # Rebuild output for this batch item (always 3-channel)
-                if i == 0:
-                    out = torch.zeros(B, H, W * 2, 3, device=image.device, dtype=image.dtype)
                 out[i] = frame
             else:
                 out[i] = frame

@@ -5,6 +5,7 @@ conversion to/from masks.
 """
 
 import torch
+import torch.nn.functional as F
 import json
 
 
@@ -152,7 +153,7 @@ class BBoxPad:
         y1 = max(0, y - pad_top)
         x2 = min(image_width, x + bw + pad_right)
         y2 = min(image_height, y + bh + pad_bottom)
-        out = [x1, y1, x2 - x1, y2 - y1]
+        out = [x1, y1, max(0, x2 - x1), max(0, y2 - y1)]
         return (out, json.dumps(out))
 
 
@@ -192,6 +193,9 @@ class BBoxCrop:
             m = mask
             if m.dim() == 2:
                 m = m.unsqueeze(0)
+            if m.shape[1] != H or m.shape[2] != W:
+                m = F.interpolate(m.unsqueeze(1), size=(H, W),
+                                  mode="bilinear", align_corners=False).squeeze(1)
             cropped_mask = m[:, y1:y2, x1:x2]
         else:
             cropped_mask = torch.ones(B, y2 - y1, x2 - x1, dtype=torch.float32, device=image.device)

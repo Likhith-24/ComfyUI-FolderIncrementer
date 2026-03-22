@@ -224,51 +224,76 @@ class MaskPropagateVideo:
         try:
             from sam2.sam2_video_predictor import SAM2VideoPredictor
             import json as json_mod
-            import tempfile, os
+            import tempfile
+            import os
+            from PIL import Image as PILImage
 
-            predictor = SAM2VideoPredictor(model)
+            # Upgrade model in-place if needed
+            if not isinstance(model, SAM2VideoPredictor):
+                model.__class__ = SAM2VideoPredictor
+                model.fill_hole_area = 8
+                model.non_overlap_masks = False
+                model.clear_non_cond_mem_around_input = False
+                model.add_all_frames_to_correct_as_cond = False
+            predictor = model
 
-            # SAM2 video predictor expects a video directory or frames
-            # We'll create a temporary approach
-            frames_np = []
-            for i in range(B):
-                frame = (images[i].cpu().numpy() * 255).astype(np.uint8)
-                frames_np.append(frame)
+            # SAM2 video predictor requires JPEG frames in a temp directory
+            tmp = tempfile.mkdtemp(prefix="mec_prop_")
+            try:
+                for i in range(B):
+                    frame = (images[i].cpu().numpy() * 255).astype(np.uint8)
+                    PILImage.fromarray(frame).save(
+                        os.path.join(tmp, f"{i:06d}.jpg"), quality=95,
+                    )
 
-            # Initialize with mask on source frame
-            state = predictor.init_state(video_path=None, frames=frames_np)
+                state = predictor.init_state(video_path=tmp)
 
-            # Add mask prompt
-            mask_np = src_mask.cpu().numpy()
-            predictor.add_new_mask(state, frame_idx=source_frame,
-                                   obj_id=1, mask=mask_np)
+                # Add prompts: convert mask to point prompt (center of mass)
+                # and/or use the mask as a bbox prompt
+                mask_np = src_mask.cpu().numpy()
+                ys, xs = np.where(mask_np > 0.5)
 
-            # Parse optional points
-            if points_json and points_json.strip():
-                try:
-                    pts = json_mod.loads(points_json)
-                    if pts:
-                        coords = np.array([[p["x"], p["y"]] for p in pts], dtype=np.float32)
-                        labels = np.array([p.get("label", 1) for p in pts], dtype=np.int32)
-                        predictor.add_new_points(state, frame_idx=source_frame,
-                                                  obj_id=1, points=coords, labels=labels)
-                except Exception:
-                    pass
+                pkw = {
+                    "inference_state": state,
+                    "frame_idx": source_frame,
+                    "obj_id": 1,
+                }
 
-            # Propagate
-            masks = torch.zeros(B, H, W, dtype=torch.float32, device=src_mask.device)
-            for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
-                if len(mask_logits) > 0:
-                    m = (mask_logits[0] > 0).float().cpu()
-                    if m.dim() == 3:
-                        m = m[0]
-                    if m.shape[0] != H or m.shape[1] != W:
-                        m = F.interpolate(m.unsqueeze(0).unsqueeze(0),
-                                          size=(H, W), mode="bilinear",
-                                          align_corners=False).squeeze()
-                    masks[frame_idx] = m
+                if len(ys) > 0:
+                    # Derive bbox from mask
+                    box = np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float32)
+                    pkw["box"] = box
 
-            return masks
+                # Parse optional points
+                if points_json and points_json.strip():
+                    try:
+                        pts = json_mod.loads(points_json)
+                        if pts:
+                            coords = np.array([[p["x"], p["y"]] for p in pts], dtype=np.float32)
+                            labels = np.array([p.get("label", 1) for p in pts], dtype=np.int32)
+                            pkw["points"] = coords
+                            pkw["labels"] = labels
+                    except Exception:
+                        pass
+
+                predictor.add_new_points_or_box(**pkw)
+
+                # Propagate
+                masks = torch.zeros(B, H, W, dtype=torch.float32, device=src_mask.device)
+                for frame_idx, obj_ids, mask_logits in predictor.propagate_in_video(state):
+                    if mask_logits.shape[0] > 0:
+                        m = (mask_logits[0, 0] > 0).float().cpu()
+                        if m.shape[0] != H or m.shape[1] != W:
+                            m = F.interpolate(m.unsqueeze(0).unsqueeze(0),
+                                              size=(H, W), mode="bilinear",
+                                              align_corners=False).squeeze(0).squeeze(0)
+                        masks[frame_idx] = m
+
+                return masks
+
+            finally:
+                import shutil
+                shutil.rmtree(tmp, ignore_errors=True)
 
         except (ImportError, Exception):
             # Fallback to optical flow or static

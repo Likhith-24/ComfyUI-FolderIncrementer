@@ -369,6 +369,23 @@ def ensure_downloaded(name: str, dest_dir: Optional[str] = None) -> str:
         return downloaded
 
 
+def _check_vram(device: str, model_name: str) -> None:
+    """Log a warning if available VRAM looks tight for the requested model."""
+    if device == "cpu" or not torch.cuda.is_available():
+        return
+    try:
+        free, total = torch.cuda.mem_get_info()
+        free_gb = free / (1024 ** 3)
+        if free_gb < 2.0:
+            logger.warning(
+                "[MEC] Low VRAM (%.1f GB free). Loading '%s' may cause OOM. "
+                "Consider enabling 'offload_to_cpu' or using a smaller model variant.",
+                free_gb, model_name,
+            )
+    except Exception:
+        pass
+
+
 def get_or_load_model(
     name: str,
     precision: str = "fp16",
@@ -402,34 +419,45 @@ def get_or_load_model(
         if k[0] == name:
             _evict(k)
 
+    _check_vram(device, name)
+
     path = get_model_path(name)
     reg = MODEL_REGISTRY[name]
     family = reg["family"]
 
     print(f"[MEC] Loading model: {name} ({family}, {precision}, {device})")
 
-    if family == "sam2":
-        model = _load_sam2(path, reg, dtype, device)
-    elif family == "sam3":
-        model = _load_sam3(path, reg, dtype, device)
-    elif family == "vitmatte":
-        model = _load_vitmatte(path, reg, device)
-    elif family == "matanyone2":
-        model = _load_matanyone2(path, reg, dtype, device)
-    elif family == "sec":
-        model = _load_sec(path, reg, dtype, device)
-    elif family == "videomama":
-        model = _load_videomama(path, reg, dtype, device)
-    elif family == "sam_hq":
-        model = _load_sam_hq(path, reg, dtype, device)
-    elif family == "groundingdino":
-        model = _load_groundingdino(path, reg, dtype, device)
-    elif family == "rvm":
-        model = _load_rvm(path, reg, dtype, device)
-    elif family == "cutie":
-        model = _load_cutie(path, reg, dtype, device)
-    else:
-        raise ValueError(f"Unknown model family: {family}")
+    try:
+        if family == "sam2":
+            model = _load_sam2(path, reg, dtype, device)
+        elif family == "sam3":
+            model = _load_sam3(path, reg, dtype, device)
+        elif family == "vitmatte":
+            model = _load_vitmatte(path, reg, device)
+        elif family == "matanyone2":
+            model = _load_matanyone2(path, reg, dtype, device)
+        elif family == "sec":
+            model = _load_sec(path, reg, dtype, device)
+        elif family == "videomama":
+            model = _load_videomama(path, reg, dtype, device)
+        elif family == "sam_hq":
+            model = _load_sam_hq(path, reg, dtype, device)
+        elif family == "groundingdino":
+            model = _load_groundingdino(path, reg, dtype, device)
+        elif family == "rvm":
+            model = _load_rvm(path, reg, dtype, device)
+        elif family == "cutie":
+            model = _load_cutie(path, reg, dtype, device)
+        else:
+            raise ValueError(f"Unknown model family: {family}")
+    except torch.cuda.OutOfMemoryError:
+        gc.collect()
+        torch.cuda.empty_cache()
+        raise RuntimeError(
+            f"[MEC] Out of GPU memory loading '{name}'. "
+            f"Try: enable 'offload_to_cpu', use float16 precision, "
+            f"or choose a smaller model variant (e.g. tiny/small instead of large)."
+        )
 
     _MODEL_CACHE[cache_key] = {
         "model": model,

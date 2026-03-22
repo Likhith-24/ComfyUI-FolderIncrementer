@@ -70,7 +70,7 @@ class MaskCompositeAdvanced:
         elif operation == "subtract":
             out = (a - b).clamp(0, 1)
         elif operation == "xor":
-            out = torch.abs(a - b)
+            out = ((a > 0.5).float() + (b > 0.5).float()) % 2
         elif operation == "blend":
             out = a * (1 - blend_factor) + b * blend_factor
         elif operation == "min":

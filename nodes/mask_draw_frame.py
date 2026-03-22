@@ -147,7 +147,7 @@ class MaskDrawFrame:
                         mask_np = cv2.GaussianBlur(mask_np, (kernel_size, kernel_size), feather)
                     canvas = torch.from_numpy(mask_np)
                 except ImportError:
-                    # Simple scanline fallback
+                    # Simple scanline fallback: rasterize polygon via edge-table
                     canvas = self._fill_polygon_torch(pts, height, width, value)
 
         elif shape == "line":
@@ -201,18 +201,22 @@ class MaskDrawFrame:
 
     @staticmethod
     def _fill_polygon_torch(pts, h, w, value):
-        """Simple scanline polygon fill (no cv2 dependency)."""
+        """Scanline polygon fill (no cv2 dependency)."""
         canvas = torch.zeros(h, w, dtype=torch.float32)
+        if not pts or len(pts) < 3:
+            return canvas
         n = len(pts)
         for y in range(h):
+            y_center = float(y) + 0.5
             nodes = []
             j = n - 1
             for i in range(n):
                 yi, xi = float(pts[i][1]), float(pts[i][0])
                 yj, xj = float(pts[j][1]), float(pts[j][0])
-                if (yi < y <= yj) or (yj < y <= yi):
-                    x_intersect = xi + (y - yi) / (yj - yi) * (xj - xi)
-                    nodes.append(x_intersect)
+                if (yi <= y_center < yj) or (yj <= y_center < yi):
+                    if abs(yj - yi) > 1e-8:
+                        x_intersect = xi + (y_center - yi) / (yj - yi) * (xj - xi)
+                        nodes.append(x_intersect)
                 j = i
             nodes.sort()
             for k in range(0, len(nodes) - 1, 2):

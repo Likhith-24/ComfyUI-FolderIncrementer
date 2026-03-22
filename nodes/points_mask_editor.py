@@ -176,7 +176,7 @@ class PointsMaskEditor:
             radius = float(pt.get("radius", default_radius))
 
             if softness > 0:
-                sigma = radius * softness
+                sigma = max(radius * softness, 1e-6)
                 dist_sq = (xx - px) ** 2 + (yy - py) ** 2
                 brush = torch.exp(-dist_sq / (2.0 * sigma ** 2))
                 brush[dist_sq > (3.0 * sigma) ** 2] = 0.0
@@ -302,6 +302,9 @@ class PointsMaskEditor:
             mask = existing_mask.clone()
             if mask.dim() == 2:
                 mask = mask.unsqueeze(0)
+            if mask.shape[1] != height or mask.shape[2] != width:
+                mask = F.interpolate(mask.unsqueeze(1), size=(height, width),
+                                     mode="bilinear", align_corners=False).squeeze(1)
         else:
             mask = torch.zeros(1, height, width, dtype=torch.float32, device=device)
 

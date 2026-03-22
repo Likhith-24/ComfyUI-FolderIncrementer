@@ -41,6 +41,9 @@ from .nodes.unified_segmentation_node import UnifiedSegmentationNode
 from .nodes.matting_node import MattingNode
 from .nodes.universal_reroute import UniversalRerouteMEC
 from .nodes.parameter_memory import ParameterHistoryMEC
+from .nodes.sec_matanyone_pipeline import SeCMatAnyonePipelineMEC
+from .nodes.background_remover import BackgroundRemoverMEC
+from .nodes.semantic_segment import SemanticSegmentMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -66,6 +69,9 @@ _MEC_MAPPINGS = {
     "MattingNode": MattingNode,
     "UniversalRerouteMEC": UniversalRerouteMEC,
     "ParameterHistoryMEC": ParameterHistoryMEC,
+    "SeCMatAnyonePipelineMEC": SeCMatAnyonePipelineMEC,
+    "BackgroundRemoverMEC": BackgroundRemoverMEC,
+    "SemanticSegmentMEC": SemanticSegmentMEC,
 }
 
 _MEC_DISPLAY = {
@@ -92,6 +98,9 @@ _MEC_DISPLAY = {
     "MattingNode": "Matting Node (MEC)",
     "UniversalRerouteMEC": "Universal Reroute / Dot (MEC)",
     "ParameterHistoryMEC": "Parameter History (MEC)",
+    "SeCMatAnyonePipelineMEC": "SeC + MatAnyone2 Pipeline (MEC)",
+    "BackgroundRemoverMEC": "Background Remover (MEC)",
+    "SemanticSegmentMEC": "Semantic Segment (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────

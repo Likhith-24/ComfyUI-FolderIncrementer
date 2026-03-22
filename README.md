@@ -21,11 +21,11 @@
 
 ## Overview
 
-**ComfyUI-CustomNodePacks** ships **26 nodes** organized into two packs:
+**ComfyUI-CustomNodePacks** ships **29 nodes** organized into two packs:
 
 | Pack | Nodes | Purpose |
 |------|------:|---------|
-| **MaskEditControl (MEC)** | 23 | Pinpoint mask editing, SAM2/3 segmentation, ViTMatte alpha matting, video propagation, compositing tools |
+| **MaskEditControl (MEC)** | 26 | Pinpoint mask editing, SAM1/2/3 segmentation, SeC + MatAnyone2 pipeline, background removal, face/clothes parsing, ViTMatte alpha matting, video propagation, compositing tools |
 | **FolderIncrementer** | 3 | Filesystem-safe auto-versioned output (`v001`, `v002`, …) |
 
 All nodes are prefixed with **(MEC)** in the ComfyUI node menu for easy discovery.
@@ -157,7 +157,7 @@ Runs SAM/SAM2/SAM3 inference with point + bbox prompts, iterative refinement, an
 
 #### Unified Segmentation (MEC)
 
-One-node dispatcher for **SAM2/2.1, SAM3, SeC, VideoMaMa** with automatic image vs. video detection.
+One-node dispatcher for **SAM1, SAM2/2.1, SAM3, SeC, VideoMaMa** with automatic image vs. video detection.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -196,7 +196,77 @@ End-to-end pipeline: **SAM coarse segmentation → iterative refinement → neur
 
 ---
 
+#### SeC + MatAnyone2 Pipeline (MEC)
+
+End-to-end pipeline: **SeC MLLM segmentation → MatAnyone2 temporal alpha matting** in a single node. Best for video masking with temporal consistency.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `segmentation_model` | — | SeC / SAM2 / SAM3 model selector |
+| `text_prompt` | `""` | Text description of target object (e.g. "cat", "person in red") |
+| `matting_backend` | `auto` | `auto` / `matanyone2` / `vitmatte_small` / `vitmatte_base` |
+| `edge_radius` | `15` | Edge refinement radius in pixels |
+| `n_warmup` | `5` | MatAnyone2 warmup frames (more = better temporal init) |
+| `edge_refine_method` | `none` | Optional post-matting refinement: `vitmatte` / `guided_filter` / `multi_scale_guided` |
+| `fill_holes_enabled` | `true` | Fill interior holes in alpha |
+| `min_region_size` | `64` | Remove isolated regions < N pixels |
+
+**Outputs:** `rgb` (premultiplied), `alpha_mask`, `coarse_mask`, `preview`, `info`
+
+**Pipeline stages:**
+1. SeC/SAM coarse segmentation (text or point/bbox prompts)
+2. MatAnyone2 temporal alpha matting with warmup protocol
+3. Optional edge refinement (ViTMatte / guided filter)
+4. Post-processing (hole fill, small region removal)
+
+**Key advantages over SAM + ViTMatte:**
+- SeC uses a Vision-Language Model for semantic understanding (text prompts)
+- MatAnyone2 provides temporal consistency across video frames
+- Better for long sequences with occlusions and re-appearances
+
+---
+
+#### Semantic Segment (MEC)
+
+Face / body / clothes semantic parsing using SegFormer. Select classes by name to build a combined mask.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model_name` | — | `segformer_face` (19-class facial) or `segformer_clothes` (18-class apparel) |
+| `classes_csv` | `"skin,hair"` | Comma-separated class names to include |
+| `threshold` | `0.5` | Confidence threshold |
+| `invert` | `false` | Invert output mask |
+
+**Face classes:** skin, l_brow, r_brow, l_eye, r_eye, eye_g, l_ear, r_ear, ear_r, nose, mouth, u_lip, l_lip, neck, necklace, cloth, hair, hat
+
+**Clothes classes:** hat, hair, sunglasses, upper_clothes, skirt, pants, dress, belt, left_shoe, right_shoe, face, left_leg, right_leg, left_arm, right_arm, bag, scarf
+
+**Output:** `mask`, `info`
+
+---
+
 ### Alpha Matting
+
+#### Background Remover (MEC)
+
+One-click background removal using RMBG-2.0 or BiRefNet. Outputs a clean foreground and alpha mask.
+
+| Model | Quality | Best for |
+|-------|---------|----------|
+| `rmbg_2.0` | ★★★★☆ | General-purpose, fast |
+| `birefnet_general` | ★★★★★ | High-detail edges |
+| `birefnet_portrait` | ★★★★★ | Human portraits |
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `model_name` | — | Background removal model selector |
+| `threshold` | `0.5` | Alpha threshold (0 = soft, 1 = hard) |
+| `invert` | `false` | Keep background instead |
+| `mask_blur` | `0` | Gaussian blur on mask edges |
+
+**Outputs:** `foreground` (premultiplied RGB), `mask`, `info`
+
+---
 
 #### Matting Node (MEC)
 

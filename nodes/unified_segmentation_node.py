@@ -178,7 +178,7 @@ def _validate_output(
 #  Segmentation Families  (for scan filtering)
 # ══════════════════════════════════════════════════════════════════════
 
-_SEG_FAMILIES = {"sam2", "sam3", "sec", "videomama", "sam_hq"}
+_SEG_FAMILIES = {"sam1", "sam2", "sam3", "sec", "videomama", "sam_hq"}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -435,7 +435,12 @@ class UnifiedSegmentationNode:
         annotation_frame_idx = min(annotation_frame_idx, max(0, B - 1))
 
         # ── Dispatch by family ────────────────────────────────────────
-        if family == "sam2":
+        if family == "sam1":
+            masks, score = self._run_sam1(
+                model, image, pt_coords, pt_labels, pos_box,
+                multimask, mask_index, device, B, H, W,
+            )
+        elif family == "sam2":
             masks, score = self._run_sam2(
                 model, image, pt_coords, pt_labels, pos_box,
                 multimask, mask_index, torch_dtype, device,
@@ -516,6 +521,57 @@ class UnifiedSegmentationNode:
             except (json.JSONDecodeError, KeyError):
                 pass
         return merged
+
+    # ══════════════════════════════════════════════════════════════════
+    #  SAM1 (Original Segment Anything)
+    # ══════════════════════════════════════════════════════════════════
+
+    def _run_sam1(
+        self,
+        loaded,
+        image: torch.Tensor,
+        pt_coords,
+        pt_labels,
+        box_np,
+        multimask: bool,
+        mask_index: int,
+        device: str,
+        B: int, H: int, W: int,
+    ):
+        """Run original SAM (v1) inference — single image only."""
+        try:
+            from segment_anything import SamPredictor
+        except ImportError:
+            raise RuntimeError(
+                "segment_anything is required for SAM1.\n"
+                "  pip install segment-anything"
+            )
+
+        model = loaded["model"] if isinstance(loaded, dict) else loaded
+        predictor = SamPredictor(model)
+
+        # SAM1 is image-only; process first frame for batches
+        img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
+        predictor.set_image(img_np)
+
+        kwargs = {"multimask_output": multimask}
+        if pt_coords is not None and len(pt_coords) > 0:
+            kwargs["point_coords"] = pt_coords
+            kwargs["point_labels"] = pt_labels
+        if box_np is not None:
+            kwargs["box"] = box_np
+
+        if "point_coords" not in kwargs and "box" not in kwargs:
+            return torch.zeros(B, H, W, dtype=torch.float32), 0.0
+
+        masks_np, scores, _ = predictor.predict(**kwargs)
+        # masks_np: (N, H, W) bool
+        idx = min(mask_index, len(scores) - 1)
+        best_mask = torch.from_numpy(masks_np[idx].astype(np.float32))
+
+        # Expand to batch
+        result = best_mask.unsqueeze(0).expand(B, -1, -1).contiguous()
+        return result, float(scores[idx])
 
     # ══════════════════════════════════════════════════════════════════
     #  SAM2 / SAM2.1 Dispatcher

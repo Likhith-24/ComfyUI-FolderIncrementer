@@ -44,6 +44,31 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════════
 
 MODEL_REGISTRY: dict[str, dict] = {
+    # ── SAM 1 (Original Segment Anything) ────────────────────────────
+    "sam_vit_h": {
+        "family": "sam1",
+        "repo_id": "ybelkada/segment-anything",
+        "filename": "sam_vit_h_4b8939.pth",
+        "config": None,
+        "version": "vit_h",
+        "model_dir": "sams",
+    },
+    "sam_vit_l": {
+        "family": "sam1",
+        "repo_id": "ybelkada/segment-anything",
+        "filename": "sam_vit_l_0b3195.pth",
+        "config": None,
+        "version": "vit_l",
+        "model_dir": "sams",
+    },
+    "sam_vit_b": {
+        "family": "sam1",
+        "repo_id": "ybelkada/segment-anything",
+        "filename": "sam_vit_b_01ec64.pth",
+        "config": None,
+        "version": "vit_b",
+        "model_dir": "sams",
+    },
     # ── SAM 2.0 ──────────────────────────────────────────────────────
     "sam2_hiera_tiny": {
         "family": "sam2",
@@ -194,6 +219,48 @@ MODEL_REGISTRY: dict[str, dict] = {
         "config": None,
         "version": "vit_tiny",
         "model_dir": "sams",
+    },
+    # ── RMBG (Background Removal) ────────────────────────────────────
+    "rmbg_2.0": {
+        "family": "rmbg",
+        "repo_id": "briaai/RMBG-2.0",
+        "filename": None,
+        "config": None,
+        "version": "2.0",
+        "model_dir": "rmbg",
+    },
+    "birefnet_general": {
+        "family": "birefnet",
+        "repo_id": "ZhengPeng7/BiRefNet",
+        "filename": None,
+        "config": None,
+        "version": "general",
+        "model_dir": "birefnet",
+    },
+    "birefnet_portrait": {
+        "family": "birefnet",
+        "repo_id": "ZhengPeng7/BiRefNet-portrait",
+        "filename": None,
+        "config": None,
+        "version": "portrait",
+        "model_dir": "birefnet",
+    },
+    # ── Semantic Segmentation (Face / Body / Clothes) ────────────────
+    "segformer_face": {
+        "family": "segformer_face",
+        "repo_id": "jonathandinu/face-parsing",
+        "filename": None,
+        "config": None,
+        "version": "face",
+        "model_dir": "segformer",
+    },
+    "segformer_clothes": {
+        "family": "segformer_clothes",
+        "repo_id": "mattmdjaga/segformer_b2_clothes",
+        "filename": None,
+        "config": None,
+        "version": "clothes",
+        "model_dir": "segformer",
     },
     # ── GroundingDINO (Text-to-BBox) ─────────────────────────────────
     "groundingdino_swint_ogc": {
@@ -428,7 +495,9 @@ def get_or_load_model(
     print(f"[MEC] Loading model: {name} ({family}, {precision}, {device})")
 
     try:
-        if family == "sam2":
+        if family == "sam1":
+            model = _load_sam1(path, reg, dtype, device)
+        elif family == "sam2":
             model = _load_sam2(path, reg, dtype, device)
         elif family == "sam3":
             model = _load_sam3(path, reg, dtype, device)
@@ -448,6 +517,12 @@ def get_or_load_model(
             model = _load_rvm(path, reg, dtype, device)
         elif family == "cutie":
             model = _load_cutie(path, reg, dtype, device)
+        elif family == "rmbg":
+            model = _load_rmbg(path, reg, device)
+        elif family == "birefnet":
+            model = _load_birefnet(path, reg, device)
+        elif family in ("segformer_face", "segformer_clothes"):
+            model = _load_segformer(path, reg, device)
         else:
             raise ValueError(f"Unknown model family: {family}")
     except torch.cuda.OutOfMemoryError:
@@ -1012,6 +1087,90 @@ def _load_groundingdino(path: str, reg: dict, dtype: torch.dtype, device: str):
     model = model.eval()
     logger.info("[MEC] GroundingDINO loaded: %s (%s)", version, device)
     return {"model": model, "version": version, "device": device}
+
+
+def _load_sam1(path: str, reg: dict, dtype: torch.dtype, device: str):
+    """Load original SAM (Segment Anything v1) model."""
+    try:
+        from segment_anything import sam_model_registry
+    except ImportError:
+        raise RuntimeError(
+            "segment_anything package is required for SAM1.  Install with:\n"
+            "  pip install segment-anything"
+        )
+
+    vit_type = reg.get("version", "vit_h")
+    model = sam_model_registry[vit_type](checkpoint=path)
+    model = model.to(dtype).to(device).eval()
+    logger.info("[MEC] SAM1 loaded: %s (%s)", vit_type, device)
+    return {"model": model, "model_type": vit_type}
+
+
+def _load_rmbg(path: str, reg: dict, device: str):
+    """Load RMBG-2.0 background removal model via transformers."""
+    try:
+        from transformers import AutoModelForImageSegmentation, AutoImageProcessor
+    except ImportError:
+        raise RuntimeError(
+            "transformers is required for RMBG.  Install:\n"
+            "  pip install transformers"
+        )
+
+    repo_or_path = path if os.path.isdir(path) else reg["repo_id"]
+    logger.info("[MEC] Loading RMBG from %s", repo_or_path)
+    model = AutoModelForImageSegmentation.from_pretrained(
+        repo_or_path, trust_remote_code=True,
+    )
+    try:
+        processor = AutoImageProcessor.from_pretrained(repo_or_path, trust_remote_code=True)
+    except Exception:
+        processor = None
+    model = model.to(device).eval()
+    logger.info("[MEC] RMBG loaded (%s)", device)
+    return {"model": model, "processor": processor}
+
+
+def _load_birefnet(path: str, reg: dict, device: str):
+    """Load BiRefNet bilateral reference network."""
+    try:
+        from transformers import AutoModelForImageSegmentation, AutoImageProcessor
+    except ImportError:
+        raise RuntimeError(
+            "transformers is required for BiRefNet.  Install:\n"
+            "  pip install transformers"
+        )
+
+    repo_or_path = path if os.path.isdir(path) else reg["repo_id"]
+    logger.info("[MEC] Loading BiRefNet from %s", repo_or_path)
+    model = AutoModelForImageSegmentation.from_pretrained(
+        repo_or_path, trust_remote_code=True,
+    )
+    try:
+        processor = AutoImageProcessor.from_pretrained(repo_or_path, trust_remote_code=True)
+    except Exception:
+        processor = None
+    model = model.to(device).eval()
+    logger.info("[MEC] BiRefNet loaded: %s (%s)", reg.get("version"), device)
+    return {"model": model, "processor": processor}
+
+
+def _load_segformer(path: str, reg: dict, device: str):
+    """Load SegFormer model for face/body/clothes parsing."""
+    try:
+        from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
+    except ImportError:
+        raise RuntimeError(
+            "transformers is required for SegFormer.  Install:\n"
+            "  pip install transformers"
+        )
+
+    repo_or_path = path if os.path.isdir(path) else reg["repo_id"]
+    logger.info("[MEC] Loading SegFormer from %s", repo_or_path)
+    model = SegformerForSemanticSegmentation.from_pretrained(repo_or_path)
+    processor = SegformerImageProcessor.from_pretrained(repo_or_path)
+    model = model.to(device).eval()
+    logger.info("[MEC] SegFormer loaded: %s (%s)", reg.get("version"), device)
+    return {"model": model, "processor": processor}
 
 
 def _load_rvm(path: str, reg: dict, dtype: torch.dtype, device: str):

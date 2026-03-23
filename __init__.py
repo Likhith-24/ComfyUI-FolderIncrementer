@@ -44,6 +44,11 @@ from .nodes.parameter_memory import ParameterHistoryMEC
 from .nodes.sec_matanyone_pipeline import SeCMatAnyonePipelineMEC
 from .nodes.background_remover import BackgroundRemoverMEC
 from .nodes.semantic_segment import SemanticSegmentMEC
+from .nodes.luminance_keyer import LuminanceKeyerMEC
+from .nodes.mask_failure_explainer import MaskFailureExplainerMEC
+from .nodes.temporal_anchor import TemporalAnchorMEC
+from .nodes.sam_multi_mask_picker import SamMultiMaskPickerMEC
+from .nodes.inpaint_suite import InpaintCropProMEC, InpaintStitchProMEC, InpaintMaskPrepareMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -72,6 +77,13 @@ _MEC_MAPPINGS = {
     "SeCMatAnyonePipelineMEC": SeCMatAnyonePipelineMEC,
     "BackgroundRemoverMEC": BackgroundRemoverMEC,
     "SemanticSegmentMEC": SemanticSegmentMEC,
+    "LuminanceKeyerMEC": LuminanceKeyerMEC,
+    "MaskFailureExplainerMEC": MaskFailureExplainerMEC,
+    "TemporalAnchorMEC": TemporalAnchorMEC,
+    "SamMultiMaskPickerMEC": SamMultiMaskPickerMEC,
+    "InpaintCropProMEC": InpaintCropProMEC,
+    "InpaintStitchProMEC": InpaintStitchProMEC,
+    "InpaintMaskPrepareMEC": InpaintMaskPrepareMEC,
 }
 
 _MEC_DISPLAY = {
@@ -101,6 +113,13 @@ _MEC_DISPLAY = {
     "SeCMatAnyonePipelineMEC": "SeC + MatAnyone2 Pipeline (MEC)",
     "BackgroundRemoverMEC": "Background Remover (MEC)",
     "SemanticSegmentMEC": "Semantic Segment (MEC)",
+    "LuminanceKeyerMEC": "Luminance Keyer (MEC)",
+    "MaskFailureExplainerMEC": "Mask Failure Explainer (MEC)",
+    "TemporalAnchorMEC": "Temporal Anchor System (MEC)",
+    "SamMultiMaskPickerMEC": "SAM Multi-Mask Picker (MEC)",
+    "InpaintCropProMEC": "Inpaint Crop Pro (MEC)",
+    "InpaintStitchProMEC": "Inpaint Stitch Pro (MEC)",
+    "InpaintMaskPrepareMEC": "Inpaint Mask Prepare (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────

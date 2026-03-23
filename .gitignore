@@ -29,6 +29,7 @@ third_party/
 tasks/
 tests/
 autoresearch-nodepacks/
+autoresearch-nexus/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

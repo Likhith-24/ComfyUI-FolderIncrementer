@@ -23,12 +23,14 @@
 
 ## Overview
 
-**ComfyUI-CustomNodePacks** ships **36 nodes** organized into two packs:
+**ComfyUI-CustomNodePacks** ships **36 nodes** organized into four packs:
 
 | Pack | Nodes | Purpose |
 |------|------:|---------|
-| **MaskEditControl (MEC)** | 33 | Pinpoint mask editing, SAM1/2/3 segmentation, SAM multi-mask picker, SeC + MatAnyone2 pipeline, background removal, face/clothes parsing, ViTMatte alpha matting, luminance keying, inpaint crop/stitch suite, mask failure diagnostics, temporal anchor interpolation, video propagation, compositing tools |
+| **MaskEditControl (MEC)** | 31 | Pinpoint mask editing, SAM1/2/3 segmentation, SAM multi-mask picker, SeC + MatAnyone2 pipeline, background removal, face/clothes parsing, ViTMatte alpha matting, luminance keying, inpaint crop/stitch suite, mask failure diagnostics, temporal anchor interpolation, video propagation, compositing tools |
 | **FolderIncrementer** | 3 | Filesystem-safe auto-versioned output (`v001`, `v002`, …) |
+| **Universal Reroute** | 1 | Nuke-style Dot node — reroute any wire type for cleaner workflow graphs |
+| **Parameter Memory** | 1 | Tracks every parameter change with SQLite history, defaults recall, and per-run diffing |
 
 All nodes are prefixed with **(MEC)** in the ComfyUI node menu for easy discovery.
 

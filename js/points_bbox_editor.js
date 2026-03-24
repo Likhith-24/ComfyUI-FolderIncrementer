@@ -454,15 +454,16 @@ class PointsBBoxEditor {
         const posCount = this.points.filter(p => p.label === 1).length;
         const negCount = this.points.filter(p => p.label === 0).length;
 
+        // Use fixed-width pills/buttons to prevent layout jitter from text measurement
         bx = this._drawPill(ctx, bx, by, bh, `${posCount}`, POINT_COLORS.positive, "+pts");
         bx = this._drawPill(ctx, bx + 4, by, bh, `${negCount}`, POINT_COLORS.negative, "\u2212pts");
         bx = this._drawPill(ctx, bx + 4, by, bh, `${this.bboxes.length}`, "#89b4fa", "bbox");
         bx += 8;
-        ctx.fillStyle = "#45475a"; ctx.fillRect(bx, by + 2, 1, bh - 4); bx += 8;
+        ctx.fillStyle = "#45475a"; ctx.fillRect(Math.round(bx), by + 2, 1, bh - 4); bx += 8;
 
         bx = this._drawPill(ctx, bx, by, bh, `r:${this.currentRadius.toFixed(1)}`, "#cdd6f4", null);
         bx += 8;
-        ctx.fillStyle = "#45475a"; ctx.fillRect(bx, by + 2, 1, bh - 4); bx += 8;
+        ctx.fillStyle = "#45475a"; ctx.fillRect(Math.round(bx), by + 2, 1, bh - 4); bx += 8;
 
         bx = this._drawButton(ctx, bx, by, bh, "\u2715 Pts", "clearPoints", BTN_COLORS.danger);
         bx += 4;
@@ -470,7 +471,7 @@ class PointsBBoxEditor {
         bx += 4;
         bx = this._drawButton(ctx, bx, by, bh, "\u2715 All", "clearAll", BTN_COLORS.danger);
         bx += 8;
-        ctx.fillStyle = "#45475a"; ctx.fillRect(bx, by + 2, 1, bh - 4); bx += 8;
+        ctx.fillStyle = "#45475a"; ctx.fillRect(Math.round(bx), by + 2, 1, bh - 4); bx += 8;
 
         bx = this._drawButton(ctx, bx, by, bh, "\u21b6 Undo", "undo", BTN_COLORS.default);
         bx += 4;
@@ -482,6 +483,7 @@ class PointsBBoxEditor {
     }
 
     _drawPill(ctx, x, y, h, text, color, subLabel) {
+        x = Math.round(x);
         ctx.font = "bold 10px Inter, system-ui, sans-serif";
         const tw = ctx.measureText(text).width;
         let subW = 0;
@@ -489,7 +491,7 @@ class PointsBBoxEditor {
             ctx.font = "9px Inter, system-ui, sans-serif";
             subW = ctx.measureText(subLabel).width + 4;
         }
-        const pw = tw + subW + 12;
+        const pw = Math.round(tw + subW + 12);
         ctx.fillStyle = color + "22";
         _roundRect(ctx, x, y, pw, h, 4); ctx.fill();
         ctx.strokeStyle = color + "44"; ctx.lineWidth = 1;
@@ -506,9 +508,10 @@ class PointsBBoxEditor {
     }
 
     _drawButton(ctx, x, y, h, label, action, colors) {
+        x = Math.round(x);
         ctx.font = "bold 10px Inter, system-ui, sans-serif";
         const tw = ctx.measureText(label).width;
-        const bw = tw + 14;
+        const bw = Math.round(tw + 14);
         const isHov = this._hoveredButton === action;
         ctx.fillStyle = isHov ? colors.hover : colors.bg;
         _roundRect(ctx, x, y, bw, h, 4); ctx.fill();
@@ -590,7 +593,10 @@ app.registerExtension({
 
         // ── Size update callback (called when reference image loads with NEW dims)
         let _prevSizeKey = "";
+        let _resizeDebounceTimer = null;
+        let _isResizing = false;
         function updateEditorSize() {
+            if (_isResizing) return;
             const imgW = editor._canvasW;
             const imgH = editor._canvasH;
             if (imgW <= 0 || imgH <= 0) return;
@@ -601,13 +607,24 @@ app.registerExtension({
             const newEditorH = Math.max(350, Math.min(displayH, 700));
             const totalH = newEditorH + 280;
             const newW = Math.max(nodeW, Math.min(imgW + 40, 800));
-            const sizeKey = `${newW}x${totalH}`;
+            // Snap to integers to prevent sub-pixel oscillation
+            const snappedW = Math.round(newW);
+            const snappedH = Math.round(totalH);
+            const sizeKey = `${snappedW}x${snappedH}`;
             // Only resize if the computed size actually differs
             if (sizeKey === _prevSizeKey) return;
             _prevSizeKey = sizeKey;
             _editorHeight = newEditorH;
-            node.setSize([newW, totalH]);
-            if (node.graph) node.graph.setDirtyCanvas(true, true);
+            // Debounce to prevent rapid consecutive resizes (jitter)
+            if (_resizeDebounceTimer) clearTimeout(_resizeDebounceTimer);
+            _resizeDebounceTimer = setTimeout(() => {
+                _resizeDebounceTimer = null;
+                _isResizing = true;
+                node.setSize([snappedW, snappedH]);
+                if (node.graph) node.graph.setDirtyCanvas(true, true);
+                // Allow layout to settle before accepting new resize requests
+                requestAnimationFrame(() => { _isResizing = false; });
+            }, 50);
         }
         editor._onImageLoaded = updateEditorSize;
 

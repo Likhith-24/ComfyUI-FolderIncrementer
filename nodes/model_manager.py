@@ -351,7 +351,7 @@ def get_model_path(name: str) -> str:
         # Not downloaded yet — return repo_id for from_pretrained()
         return reg["repo_id"]
 
-    # Check local filesystem
+    # Check local filesystem — prefer .safetensors when available
     dirs_to_check = [os.path.join(_MODELS_DIR, model_dir)]
     if model_dir != "sams":
         dirs_to_check.append(os.path.join(_MODELS_DIR, "sams"))
@@ -366,6 +366,15 @@ def get_model_path(name: str) -> str:
                 except Exception:
                     pass
 
+    # Try .safetensors alternative first (except for sam3 which only has .pt)
+    safetensors_alt = _get_safetensors_alternative(fname)
+    if safetensors_alt and safetensors_alt != fname:
+        for d in dirs_to_check:
+            c = os.path.join(d, safetensors_alt)
+            if os.path.exists(c):
+                logger.info("[MEC] Using .safetensors format: %s", safetensors_alt)
+                return c
+
     for d in dirs_to_check:
         c = os.path.join(d, fname)
         if os.path.exists(c):
@@ -374,6 +383,23 @@ def get_model_path(name: str) -> str:
     # Not found locally — download
     dest_dir = dirs_to_check[0]
     return ensure_downloaded(name, dest_dir)
+
+
+def _get_safetensors_alternative(filename: str) -> Optional[str]:
+    """Return a .safetensors filename variant if the original is .pt/.pth/.bin.
+
+    SAM3 (sam3.pt) is excluded since no .safetensors version exists.
+    Returns None if no alternative makes sense.
+    """
+    if filename is None:
+        return None
+    # SAM3 exception: only .pt format available
+    if filename.lower().startswith("sam3"):
+        return None
+    stem, ext = os.path.splitext(filename)
+    if ext.lower() in (".pt", ".pth", ".bin"):
+        return stem + ".safetensors"
+    return None
 
 
 def ensure_downloaded(name: str, dest_dir: Optional[str] = None) -> str:
@@ -597,10 +623,18 @@ def scan_model_dir(family: Optional[str] = None) -> list[str]:
         located = False
 
         if fname is not None:
-            for sub in (model_dir, "sams"):
-                candidate = os.path.join(_MODELS_DIR, sub, fname)
-                if os.path.exists(candidate):
-                    located = True
+            # Also check for .safetensors alternative
+            safetensors_alt = _get_safetensors_alternative(fname)
+            names_to_check = [fname]
+            if safetensors_alt:
+                names_to_check.insert(0, safetensors_alt)  # Prefer safetensors
+            for fn in names_to_check:
+                for sub in (model_dir, "sams"):
+                    candidate = os.path.join(_MODELS_DIR, sub, fn)
+                    if os.path.exists(candidate):
+                        located = True
+                        break
+                if located:
                     break
         else:
             local_dir = os.path.join(_MODELS_DIR, model_dir, name)

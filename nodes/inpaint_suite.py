@@ -607,6 +607,10 @@ class InpaintCropProMEC:
     - Separated inpaint_mask_mode from stitch_blend_mode
     - Edge-aware, Laplacian pyramid, and frequency blend modes
     - video_stable_crop for consistent bbox across video frames
+    - Downscale/upscale factors for quality control
+    - Mask pre-processing (blur, grow/shrink)
+    - Aspect ratio presets with snap to multiple of 8
+    - CROP_MASK output for mask-aware workflows
     """
 
     VRAM_TIER = 1
@@ -614,6 +618,12 @@ class InpaintCropProMEC:
     INPAINT_MASK_MODES = ["hard_binary", "slight_feather", "soft_blend"]
     SIZE_MODES = ["free_size", "forced_size", "ranged_size"]
     FILL_MODES = ["edge_pad", "neutral_gray", "original"]
+    ASPECT_RATIOS = [
+        "none",
+        "1:1", "4:3", "3:4", "16:9", "9:16",
+        "3:2", "2:3", "21:9", "9:21",
+        "5:4", "4:5", "custom",
+    ]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -650,28 +660,88 @@ class InpaintCropProMEC:
                     "tooltip": "Maximum dimension for ranged_size mode"}),
                 "padding_multiple": ("INT", {
                     "default": 8, "min": 1, "max": 128, "step": 1,
-                    "tooltip": "Pad output dimensions to be divisible by this value"}),
+                    "tooltip": "Pad output dimensions to be divisible by this value (default: 8)"}),
                 "video_stable_crop": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Lock bbox across all frames using union of all mask regions (for video)"}),
                 "fill_masked_area": (cls.FILL_MODES, {
                     "default": "edge_pad",
                     "tooltip": "How to fill the masked area in the crop: edge_pad, neutral_gray, or original"}),
+                "downscale_factor": ("FLOAT", {
+                    "default": 1.0, "min": 0.25, "max": 1.0, "step": 0.05,
+                    "tooltip": "Downscale crop before inpainting (e.g. 0.5 = half resolution). Stitched back at original res."}),
+                "mask_blur": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 64.0, "step": 0.5,
+                    "tooltip": "Blur the mask edges before cropping (sigma in pixels)"}),
+                "mask_grow": ("INT", {
+                    "default": 0, "min": -128, "max": 128, "step": 1,
+                    "tooltip": "Grow (positive) or shrink (negative) the mask before cropping (pixels)"}),
+                "aspect_ratio": (cls.ASPECT_RATIOS, {
+                    "default": "none",
+                    "tooltip": "Force crop region to specific aspect ratio. 'none' = follow mask shape."}),
+                "custom_aspect_w": ("INT", {
+                    "default": 1, "min": 1, "max": 100, "step": 1,
+                    "tooltip": "Width component of custom aspect ratio"}),
+                "custom_aspect_h": ("INT", {
+                    "default": 1, "min": 1, "max": 100, "step": 1,
+                    "tooltip": "Height component of custom aspect ratio"}),
             },
         }
 
-    RETURN_TYPES = ("STITCH_DATA", "IMAGE", "MASK", "MASK", "STRING")
-    RETURN_NAMES = ("stitch_data", "cropped_image", "inpaint_mask", "stitch_blend_mask", "info")
+    RETURN_TYPES = ("STITCH_DATA", "IMAGE", "MASK", "MASK", "MASK", "STRING")
+    RETURN_NAMES = ("stitch_data", "cropped_image", "inpaint_mask", "stitch_blend_mask", "crop_mask", "info")
     FUNCTION = "crop_for_inpaint"
     CATEGORY = "MaskEditControl/Inpaint"
-    DESCRIPTION = "Crop image around mask with separate inpaint and stitch blend masks. Supports edge-aware, Laplacian, and frequency blend modes."
+    DESCRIPTION = "Crop image around mask with separate inpaint and stitch blend masks. Supports edge-aware, Laplacian, frequency blend, downscale, mask processing, and aspect ratio presets."
+
+    @staticmethod
+    def _snap(val: int, multiple: int) -> int:
+        """Snap value up to nearest multiple."""
+        if multiple <= 1:
+            return val
+        return int(math.ceil(val / multiple) * multiple)
+
+    @staticmethod
+    def _parse_aspect_ratio(name: str, custom_w: int, custom_h: int):
+        """Return (w_ratio, h_ratio) or None if no aspect ratio enforcement."""
+        if name == "none":
+            return None
+        if name == "custom":
+            return (max(1, custom_w), max(1, custom_h))
+        parts = name.split(":")
+        if len(parts) == 2:
+            return (int(parts[0]), int(parts[1]))
+        return None
+
+    @staticmethod
+    def _grow_mask(mask: torch.Tensor, pixels: int) -> torch.Tensor:
+        """Morphological grow/shrink of mask. Positive = dilate, negative = erode."""
+        if pixels == 0:
+            return mask
+        k = abs(pixels) * 2 + 1
+        kernel = torch.ones(1, 1, k, k, device=mask.device, dtype=mask.dtype) / (k * k)
+        pad = abs(pixels)
+        m4 = mask.unsqueeze(1)
+        m4 = F.pad(m4, (pad, pad, pad, pad), mode="replicate")
+        conv = F.conv2d(m4, kernel)
+        out = conv.squeeze(1)
+        if pixels > 0:
+            # Dilate: any overlap → 1
+            return (out > 0.01).float()
+        else:
+            # Erode: full overlap → 1
+            return (out > 0.99).float()
 
     def crop_for_inpaint(self, image: torch.Tensor, mask: torch.Tensor,
                          context_expand: float, inpaint_mask_mode: str,
                          stitch_blend_mode: str, blend_radius: int,
                          size_mode: str, forced_width: int, forced_height: int,
                          min_size: int, max_size: int, padding_multiple: int,
-                         video_stable_crop: bool, fill_masked_area: str):
+                         video_stable_crop: bool, fill_masked_area: str,
+                         downscale_factor: float = 1.0,
+                         mask_blur: float = 0.0, mask_grow: int = 0,
+                         aspect_ratio: str = "none",
+                         custom_aspect_w: int = 1, custom_aspect_h: int = 1):
         device = _get_device(image)
         B, H, W, C = image.shape
 
@@ -682,6 +752,12 @@ class InpaintCropProMEC:
             mask = mask.expand(B, -1, -1).clone()
         if mask.shape[1] != H or mask.shape[2] != W:
             mask = _resize_mask(mask, H, W)
+
+        # ── Mask pre-processing: grow/shrink then blur ─────────────────
+        if mask_grow != 0:
+            mask = self._grow_mask(mask, mask_grow)
+        if mask_blur > 0:
+            mask = _gaussian_blur_mask(mask, sigma=mask_blur).clamp(0.0, 1.0)
 
         # Step 1: Compute bounding box
         if video_stable_crop and B > 1:
@@ -706,12 +782,46 @@ class InpaintCropProMEC:
         if crop_w <= 0 or crop_h <= 0:
             crop_x, crop_y, crop_w, crop_h = 0, 0, W, H
 
+        # ── Enforce aspect ratio on crop region ────────────────────────
+        ar = self._parse_aspect_ratio(aspect_ratio, custom_aspect_w, custom_aspect_h)
+        if ar is not None:
+            ar_w, ar_h = ar
+            target_ar = ar_w / ar_h
+            current_ar = crop_w / max(crop_h, 1)
+            if current_ar > target_ar:
+                # Too wide — increase height
+                new_h = int(round(crop_w / target_ar))
+                diff = new_h - crop_h
+                crop_y = max(0, crop_y - diff // 2)
+                crop_h = new_h
+                if crop_y + crop_h > H:
+                    crop_y = max(0, H - crop_h)
+                    crop_h = min(crop_h, H - crop_y)
+            else:
+                # Too tall — increase width
+                new_w = int(round(crop_h * target_ar))
+                diff = new_w - crop_w
+                crop_x = max(0, crop_x - diff // 2)
+                crop_w = new_w
+                if crop_x + crop_w > W:
+                    crop_x = max(0, W - crop_w)
+                    crop_w = min(crop_w, W - crop_x)
+
+        # Snap crop dimensions to padding_multiple
+        crop_w = min(self._snap(crop_w, padding_multiple), W - crop_x)
+        crop_h = min(self._snap(crop_h, padding_multiple), H - crop_y)
+
         # Step 3: Compute target output size
         target_w, target_h = _apply_size_mode(
             crop_w, crop_h, size_mode,
             forced_width, forced_height,
             min_size, max_size, padding_multiple
         )
+
+        # Apply downscale factor
+        if downscale_factor < 1.0:
+            target_w = max(padding_multiple, self._snap(int(target_w * downscale_factor), padding_multiple))
+            target_h = max(padding_multiple, self._snap(int(target_h * downscale_factor), padding_multiple))
 
         # Step 4: Crop image and mask
         cropped = image[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :].clone()
@@ -742,6 +852,10 @@ class InpaintCropProMEC:
             cropped, cropped_mask, stitch_blend_mode, blend_radius
         )
 
+        # Step 8.5: Generate crop_mask (binary mask showing cropped region in original image space)
+        crop_mask = torch.zeros(B, H, W, device=device, dtype=torch.float32)
+        crop_mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w] = 1.0
+
         # Step 9: Build stitch_data dict
         stitch_data = {
             "original_image": image,
@@ -755,6 +869,7 @@ class InpaintCropProMEC:
             "blend_radius": blend_radius,
             "stitch_blend_mask_crop": stitch_blend_mask,
             "original_mask": mask,
+            "downscale_factor": downscale_factor,
         }
 
         # Step 10: Build info string
@@ -764,6 +879,9 @@ class InpaintCropProMEC:
             f"  mask bbox: x={bbox_x}, y={bbox_y}, w={bbox_w}, h={bbox_h}",
             f"  crop region: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}",
             f"  context_expand: {context_expand:.2f}",
+            f"  aspect_ratio: {aspect_ratio}",
+            f"  downscale_factor: {downscale_factor:.2f}",
+            f"  mask_blur: {mask_blur:.1f}, mask_grow: {mask_grow}",
             f"  output size: {target_w}x{target_h} (mode={size_mode})",
             f"  inpaint_mask_mode: {inpaint_mask_mode}",
             f"  stitch_blend_mode: {stitch_blend_mode}, radius={blend_radius}",
@@ -774,7 +892,7 @@ class InpaintCropProMEC:
         ]
         info = "\n".join(info_lines)
 
-        return (stitch_data, cropped, inpaint_mask, stitch_blend_mask, info)
+        return (stitch_data, cropped, inpaint_mask, stitch_blend_mask, crop_mask, info)
 
 
 # ══════════════════════════════════════════════════════════════════════

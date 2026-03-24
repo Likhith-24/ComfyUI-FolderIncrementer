@@ -49,6 +49,7 @@ from .nodes.mask_failure_explainer import MaskFailureExplainerMEC
 from .nodes.temporal_anchor import TemporalAnchorMEC
 from .nodes.sam_multi_mask_picker import SamMultiMaskPickerMEC
 from .nodes.inpaint_suite import InpaintCropProMEC, InpaintStitchProMEC, InpaintMaskPrepareMEC
+from .nodes.image_comparer import ImageComparerMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -84,6 +85,7 @@ _MEC_MAPPINGS = {
     "InpaintCropProMEC": InpaintCropProMEC,
     "InpaintStitchProMEC": InpaintStitchProMEC,
     "InpaintMaskPrepareMEC": InpaintMaskPrepareMEC,
+    "ImageComparerMEC": ImageComparerMEC,
 }
 
 _MEC_DISPLAY = {
@@ -120,6 +122,7 @@ _MEC_DISPLAY = {
     "InpaintCropProMEC": "Inpaint Crop Pro (MEC)",
     "InpaintStitchProMEC": "Inpaint Stitch Pro (MEC)",
     "InpaintMaskPrepareMEC": "Inpaint Mask Prepare (MEC)",
+    "ImageComparerMEC": "Image Comparer (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────

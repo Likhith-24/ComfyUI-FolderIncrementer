@@ -63,6 +63,15 @@ class SAMMaskGeneratorMEC:
                         "then feeds to SAM for precise mask generation."
                     ),
                 }),
+                "negative_text_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": (
+                        "Text description of objects to EXCLUDE (e.g. 'background', 'wall').\n"
+                        "Uses GroundingDINO to detect these regions, then generates negative "
+                        "points from them to suppress unwanted areas in the mask."
+                    ),
+                }),
                 "grounding_model": (gdino_models, {
                     "default": "none",
                     "tooltip": (
@@ -119,7 +128,8 @@ class SAMMaskGeneratorMEC:
     )
 
     def generate(self, sam_model, image, points_json, bbox_json,
-                 text_prompt, grounding_model, text_threshold, text_box_threshold,
+                 text_prompt, negative_text_prompt, grounding_model,
+                 text_threshold, text_box_threshold,
                  multimask_output, mask_index, score_threshold,
                  apply_bbox_crop, refine_iterations=1,
                  auto_negative_points=False, bbox=None, existing_mask=None):
@@ -142,6 +152,19 @@ class SAMMaskGeneratorMEC:
                 if not bbox_json or not bbox_json.strip():
                     bbox_json = json.dumps(text_bbox.tolist())
 
+        # ── Negative text prompt → negative points via GroundingDINO ───
+        negative_points_from_text = []
+        if negative_text_prompt and negative_text_prompt.strip() and grounding_model != "none":
+            neg_bbox = self._text_to_bbox(
+                image, negative_text_prompt.strip(), grounding_model,
+                text_threshold, text_box_threshold, target_device,
+            )
+            if neg_bbox is not None:
+                # Sample negative points from detected negative region
+                negative_points_from_text = self._sample_points_in_bbox(
+                    neg_bbox, num_points=5
+                )
+
         # ── Move model to GPU if offloaded ─────────────────────────────
         if offload and hasattr(model, "to"):
             model.to(target_device)
@@ -152,6 +175,7 @@ class SAMMaskGeneratorMEC:
                 multimask_output, mask_index, score_threshold,
                 apply_bbox_crop, target_device, model_dtype,
                 refine_iterations, auto_negative_points, existing_mask,
+                negative_points_from_text,
             )
         finally:
             # ── Offload back to CPU ────────────────────────────────────
@@ -167,7 +191,7 @@ class SAMMaskGeneratorMEC:
                        bbox_input, multimask_output, mask_index, score_threshold,
                        apply_bbox_crop, device, dtype,
                        refine_iterations=1, auto_negative_points=False,
-                       existing_mask=None):
+                       existing_mask=None, negative_points_from_text=None):
 
         # Convert image: (B, H, W, C) float [0,1] → numpy uint8
         img_tensor = image[0]  # first image in batch
@@ -182,6 +206,18 @@ class SAMMaskGeneratorMEC:
             labels = [int(p.get("label", 1)) for p in points_list]
             point_coords = np.array(coords, dtype=np.float32)
             point_labels = np.array(labels, dtype=np.int32)
+
+        # ── Merge negative points from text prompt ─────────────────────
+        if negative_points_from_text:
+            neg_coords = np.array([[p[0], p[1]] for p in negative_points_from_text],
+                                  dtype=np.float32)
+            neg_labels = np.zeros(len(negative_points_from_text), dtype=np.int32)
+            if point_coords is not None:
+                point_coords = np.concatenate([point_coords, neg_coords], axis=0)
+                point_labels = np.concatenate([point_labels, neg_labels], axis=0)
+            else:
+                point_coords = neg_coords
+                point_labels = neg_labels
 
         # Parse bbox (shared utility)
         box_np = parse_bbox_input(bbox_json, bbox_input)
@@ -384,3 +420,31 @@ class SAMMaskGeneratorMEC:
             import logging
             logging.getLogger("MEC").warning("[MEC] GroundingDINO predict error: %s", e)
             return None
+
+    @staticmethod
+    def _sample_points_in_bbox(bbox_np, num_points: int = 5) -> list:
+        """Sample evenly-distributed points within a bounding box.
+
+        Args:
+            bbox_np: np.ndarray [x1, y1, x2, y2]
+            num_points: Number of points to sample
+
+        Returns:
+            List of [x, y] pairs inside the bbox
+        """
+        x1, y1, x2, y2 = bbox_np
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        w, h = x2 - x1, y2 - y1
+
+        if num_points == 1:
+            return [[cx, cy]]
+
+        points = [[cx, cy]]  # Always include center
+        # Add points at 25% and 75% positions
+        offsets = [0.25, 0.75]
+        for ox in offsets:
+            for oy in offsets:
+                if len(points) >= num_points:
+                    break
+                points.append([x1 + w * ox, y1 + h * oy])
+        return points[:num_points]

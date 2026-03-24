@@ -915,7 +915,7 @@ def _load_sec(path: str, reg: dict, dtype: torch.dtype, device: str):
 
             state_dict = load_file(path)
 
-            if precision_str == "fp8":
+            if precision_str == "fp8" and hasattr(torch, "float8_e4m3fn"):
                 for key in list(state_dict.keys()):
                     if state_dict[key].dtype == torch.float8_e4m3fn:
                         state_dict[key] = state_dict[key].to(torch.float16)
@@ -927,7 +927,7 @@ def _load_sec(path: str, reg: dict, dtype: torch.dtype, device: str):
         except ImportError:
             model = SeCModel(config, use_flash_attn=use_flash_attn)
             state_dict = load_file(path)
-            if precision_str == "fp8":
+            if precision_str == "fp8" and hasattr(torch, "float8_e4m3fn"):
                 for key in list(state_dict.keys()):
                     if state_dict[key].dtype == torch.float8_e4m3fn:
                         state_dict[key] = state_dict[key].to(torch.float16)

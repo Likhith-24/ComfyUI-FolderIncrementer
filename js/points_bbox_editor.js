@@ -25,12 +25,12 @@ const BBOX_COLORS     = { positive: "#22d65a", negative: "#ff4466" };
 const CROSSHAIR_COLOR = "#ffffffaa";
 const GRID_COLOR      = "#ffffff08";
 const CANVAS_BG       = "#181825";
-const TOOLBAR_BG      = "#11111bdd";
-const TOOLBAR_H       = 32;
+const TOOLBAR_BG      = "#1e1e2eee";
+const TOOLBAR_H       = 36;
 const BTN_COLORS = {
-    default:  { bg: "#313244", fg: "#cdd6f4", hover: "#45475a" },
-    danger:   { bg: "#45171e", fg: "#ff6688", hover: "#5c1f28" },
-    accent:   { bg: "#1e3a2f", fg: "#22d65a", hover: "#2a5040" },
+    default:  { bg: "#45475a", fg: "#cdd6f4", hover: "#585b70", active: "#6c7086" },
+    danger:   { bg: "#6c2030", fg: "#ffb0c0", hover: "#8c2840", active: "#a03050" },
+    accent:   { bg: "#2a6040", fg: "#80ffb0", hover: "#3a7850", active: "#4a9060" },
 };
 
 // ── Rounded rect helper ──────────────────────────────────────────────
@@ -90,6 +90,7 @@ class PointsBBoxEditor {
         // Toolbar state
         this._toolbarButtons = [];
         this._hoveredButton  = null;
+        this._activeButton   = null;
 
         // Mouse pos for status bar
         this._mouseCanvasX = 0;
@@ -443,40 +444,39 @@ class PointsBBoxEditor {
         ctx.save();
         ctx.fillStyle = TOOLBAR_BG;
         ctx.fillRect(x, y, w, TOOLBAR_H);
-        ctx.fillStyle = "#313244";
+        ctx.fillStyle = "#585b70";
         ctx.fillRect(x, y + TOOLBAR_H - 1, w, 1);
 
         this._toolbarButtons = [];
-        let bx = x + 6;
-        const by = y + 4;
-        const bh = TOOLBAR_H - 8;
+        let bx = x + 8;
+        const by = y + 5;
+        const bh = TOOLBAR_H - 10;
 
         const posCount = this.points.filter(p => p.label === 1).length;
         const negCount = this.points.filter(p => p.label === 0).length;
 
-        // Use fixed-width pills/buttons to prevent layout jitter from text measurement
         bx = this._drawPill(ctx, bx, by, bh, `${posCount}`, POINT_COLORS.positive, "+pts");
-        bx = this._drawPill(ctx, bx + 4, by, bh, `${negCount}`, POINT_COLORS.negative, "\u2212pts");
-        bx = this._drawPill(ctx, bx + 4, by, bh, `${this.bboxes.length}`, "#89b4fa", "bbox");
-        bx += 8;
-        ctx.fillStyle = "#45475a"; ctx.fillRect(Math.round(bx), by + 2, 1, bh - 4); bx += 8;
+        bx = this._drawPill(ctx, bx + 5, by, bh, `${negCount}`, POINT_COLORS.negative, "\u2212pts");
+        bx = this._drawPill(ctx, bx + 5, by, bh, `${this.bboxes.length}`, "#89b4fa", "bbox");
+        bx += 10;
+        ctx.fillStyle = "#585b70"; ctx.fillRect(Math.round(bx), by + 3, 2, bh - 6); bx += 10;
 
         bx = this._drawPill(ctx, bx, by, bh, `r:${this.currentRadius.toFixed(1)}`, "#cdd6f4", null);
-        bx += 8;
-        ctx.fillStyle = "#45475a"; ctx.fillRect(Math.round(bx), by + 2, 1, bh - 4); bx += 8;
+        bx += 10;
+        ctx.fillStyle = "#585b70"; ctx.fillRect(Math.round(bx), by + 3, 2, bh - 6); bx += 10;
 
         bx = this._drawButton(ctx, bx, by, bh, "\u2715 Pts", "clearPoints", BTN_COLORS.danger);
-        bx += 4;
+        bx += 5;
         bx = this._drawButton(ctx, bx, by, bh, "\u2715 BBox", "clearBboxes", BTN_COLORS.danger);
-        bx += 4;
+        bx += 5;
         bx = this._drawButton(ctx, bx, by, bh, "\u2715 All", "clearAll", BTN_COLORS.danger);
-        bx += 8;
-        ctx.fillStyle = "#45475a"; ctx.fillRect(Math.round(bx), by + 2, 1, bh - 4); bx += 8;
+        bx += 10;
+        ctx.fillStyle = "#585b70"; ctx.fillRect(Math.round(bx), by + 3, 2, bh - 6); bx += 10;
 
         bx = this._drawButton(ctx, bx, by, bh, "\u21b6 Undo", "undo", BTN_COLORS.default);
-        bx += 4;
+        bx += 5;
         bx = this._drawButton(ctx, bx, by, bh, "Redo \u21b7", "redo", BTN_COLORS.default);
-        bx += 4;
+        bx += 5;
         bx = this._drawButton(ctx, bx, by, bh, "\u25a3 Fit", "fitView", BTN_COLORS.accent);
 
         ctx.restore();
@@ -484,44 +484,60 @@ class PointsBBoxEditor {
 
     _drawPill(ctx, x, y, h, text, color, subLabel) {
         x = Math.round(x);
-        ctx.font = "bold 10px Inter, system-ui, sans-serif";
+        ctx.font = "bold 11px Inter, system-ui, sans-serif";
         const tw = ctx.measureText(text).width;
         let subW = 0;
         if (subLabel) {
             ctx.font = "9px Inter, system-ui, sans-serif";
-            subW = ctx.measureText(subLabel).width + 4;
+            subW = ctx.measureText(subLabel).width + 5;
         }
-        const pw = Math.round(tw + subW + 12);
-        ctx.fillStyle = color + "22";
-        _roundRect(ctx, x, y, pw, h, 4); ctx.fill();
-        ctx.strokeStyle = color + "44"; ctx.lineWidth = 1;
-        _roundRect(ctx, x, y, pw, h, 4); ctx.stroke();
-        ctx.font = "bold 10px Inter, system-ui, sans-serif";
+        const pw = Math.round(tw + subW + 16);
+        ctx.fillStyle = color + "33";
+        _roundRect(ctx, x, y, pw, h, 5); ctx.fill();
+        ctx.strokeStyle = color + "66"; ctx.lineWidth = 1;
+        _roundRect(ctx, x, y, pw, h, 5); ctx.stroke();
+        ctx.font = "bold 11px Inter, system-ui, sans-serif";
         ctx.fillStyle = color;
-        ctx.fillText(text, x + 5, y + h / 2 + 4);
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, x + 6, y + h / 2);
         if (subLabel) {
-            ctx.fillStyle = color + "88";
+            ctx.fillStyle = color + "99";
             ctx.font = "9px Inter, system-ui, sans-serif";
-            ctx.fillText(subLabel, x + tw + 7, y + h / 2 + 3);
+            ctx.fillText(subLabel, x + tw + 9, y + h / 2);
         }
+        ctx.textBaseline = "alphabetic";
         return x + pw;
     }
 
     _drawButton(ctx, x, y, h, label, action, colors) {
         x = Math.round(x);
-        ctx.font = "bold 10px Inter, system-ui, sans-serif";
+        ctx.font = "bold 11px Inter, system-ui, sans-serif";
         const tw = ctx.measureText(label).width;
-        const bw = Math.round(tw + 14);
+        const bw = Math.round(tw + 20);
         const isHov = this._hoveredButton === action;
-        ctx.fillStyle = isHov ? colors.hover : colors.bg;
-        _roundRect(ctx, x, y, bw, h, 4); ctx.fill();
+        const isActive = this._activeButton === action;
+        // Background with visible border
+        ctx.fillStyle = isActive ? colors.active : (isHov ? colors.hover : colors.bg);
+        _roundRect(ctx, x, y, bw, h, 5); ctx.fill();
+        if (isHov || isActive) {
+            ctx.strokeStyle = colors.fg + "55"; ctx.lineWidth = 1;
+            _roundRect(ctx, x, y, bw, h, 5); ctx.stroke();
+        }
+        // Centered text
         ctx.fillStyle = colors.fg;
-        ctx.fillText(label, x + 7, y + h / 2 + 4);
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, x + 10, y + h / 2);
+        ctx.textBaseline = "alphabetic";
         this._toolbarButtons.push({ x, y, w: bw, h, action });
         return x + bw;
     }
 
     handleToolbarClick(action, renderFn) {
+        // Visual click feedback
+        this._activeButton = action;
+        renderFn?.();
+        setTimeout(() => { this._activeButton = null; renderFn?.(); }, 120);
+
         switch (action) {
             case "clearPoints":
                 this.saveState();
@@ -595,17 +611,34 @@ app.registerExtension({
         let _prevSizeKey = "";
         let _resizeDebounceTimer = null;
         let _isResizing = false;
+        let _lockedNodeW = 0;
+        let _lockedNodeH = 0;
+
+        function _getOtherWidgetsHeight() {
+            // Measure cumulative height of non-editor widgets for accurate total
+            let h = 0;
+            if (node.widgets) {
+                for (const w of node.widgets) {
+                    if (w.name === "points_editor_canvas") continue;
+                    h += (w.computeSize?.(node.size?.[0] || 400)?.[1] ?? 24) + 4;
+                }
+            }
+            // Header + output slots + padding
+            return h + (LiteGraph.NODE_TITLE_HEIGHT || 30) + Math.max(0, (node.outputs?.length || 0)) * 20 + 16;
+        }
+
         function updateEditorSize() {
             if (_isResizing) return;
             const imgW = editor._canvasW;
             const imgH = editor._canvasH;
             if (imgW <= 0 || imgH <= 0) return;
-            const nodeW = node.size?.[0] || 500;
+            const nodeW = _lockedNodeW || node.size?.[0] || 500;
             const availW = Math.max(200, nodeW - 40);
             const scale  = Math.min(1.0, availW / imgW);
             const displayH = Math.round(imgH * scale) + TOOLBAR_H + 24;
             const newEditorH = Math.max(350, Math.min(displayH, 700));
-            const totalH = newEditorH + 280;
+            const otherH = _getOtherWidgetsHeight();
+            const totalH = newEditorH + otherH;
             const newW = Math.max(nodeW, Math.min(imgW + 40, 800));
             // Snap to integers to prevent sub-pixel oscillation
             const snappedW = Math.round(newW);
@@ -615,6 +648,8 @@ app.registerExtension({
             if (sizeKey === _prevSizeKey) return;
             _prevSizeKey = sizeKey;
             _editorHeight = newEditorH;
+            _lockedNodeW = snappedW;
+            _lockedNodeH = snappedH;
             // Debounce to prevent rapid consecutive resizes (jitter)
             if (_resizeDebounceTimer) clearTimeout(_resizeDebounceTimer);
             _resizeDebounceTimer = setTimeout(() => {
@@ -627,6 +662,16 @@ app.registerExtension({
             }, 50);
         }
         editor._onImageLoaded = updateEditorSize;
+
+        // Override computeSize to return locked dimensions, preventing
+        // LiteGraph from recalculating and causing relayout jitter.
+        const _origComputeSize = node.computeSize;
+        node.computeSize = function() {
+            if (_lockedNodeW > 0 && _lockedNodeH > 0) {
+                return [_lockedNodeW, _lockedNodeH];
+            }
+            return _origComputeSize?.apply(this, arguments) ?? [400, 500];
+        };
 
         // ── Render & Resize (stable – prevents shaking) ─────────────
         let _lastW = 0, _lastH = 0, _rafId = null;
@@ -775,11 +820,14 @@ app.registerExtension({
             tryLoadRefImage();
         }, 1500);
 
-        // Clean up interval when node is removed
+        // Clean up when node is removed
         const origOnRemoved = node.onRemoved;
         node.onRemoved = function() {
             origOnRemoved?.apply(this, arguments);
             if (_imgInterval) { clearInterval(_imgInterval); _imgInterval = null; }
+            if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null; }
+            if (_resizeDebounceTimer) { clearTimeout(_resizeDebounceTimer); _resizeDebounceTimer = null; }
+            canvas.removeEventListener("keydown", _keydownHandler);
             ro.disconnect();
         };
 
@@ -974,7 +1022,7 @@ app.registerExtension({
         // ── Keyboard ─────────────────────────────────────────────────
         canvas.tabIndex = 0;
         canvas.style.outline = "none";
-        canvas.addEventListener("keydown", (e) => {
+        const _keydownHandler = (e) => {
             if (e.key === "z" && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 if (e.shiftKey) editor.redo(); else editor.undo();
@@ -998,7 +1046,8 @@ app.registerExtension({
                 }
                 render();
             }
-        });
+        };
+        canvas.addEventListener("keydown", _keydownHandler);
 
         node._mecEditor = editor;
         node._mecRender = render;

@@ -240,7 +240,9 @@ def multi_scale_guided_refine(img_np, mask_np, edge_radius, detail_level):
         return None
 
     try:
-        guide = img_np[:, :, :3] if img_np.shape[-1] >= 3 else img_np
+        if img_np.ndim == 2:
+            img_np = img_np[:, :, np.newaxis]
+        guide = img_np[:, :, :3] if img_np.shape[2] >= 3 else img_np
         guide_f = guide.astype(np.float32) / 255.0
 
         scales = [
@@ -294,7 +296,9 @@ def color_aware_refine(img_np, mask_np, edge_radius, detail_level):
         return None
 
     try:
-        rgb = img_np[:, :, :3] if img_np.shape[-1] >= 3 else img_np
+        if img_np.ndim == 2:
+            img_np = np.stack([img_np] * 3, axis=-1)
+        rgb = img_np[:, :, :3] if img_np.shape[2] >= 3 else np.stack([img_np[:,:,0]] * 3, axis=-1)
         lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32) / 255.0
 
         eps = (1 - detail_level) ** 2 * 0.02 + 1e-6

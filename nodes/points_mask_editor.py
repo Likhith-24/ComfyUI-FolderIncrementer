@@ -198,11 +198,13 @@ class PointsMaskEditor:
         neg_bboxes: list,
         height: int,
         width: int,
+        softness: float = 0.0,
     ) -> torch.Tensor:
         """Fill/clear rectangular bbox regions on the mask.
 
-        Positive bboxes set pixels to 1.0.
-        Negative bboxes set pixels to 0.0.
+        Positive bboxes add to the mask (max blend to preserve soft points).
+        Negative bboxes subtract from the mask (multiplicative erase).
+        If softness > 0, bbox edges are feathered with a Gaussian falloff.
 
         Args:
             mask: [1, H, W] float32 tensor.
@@ -210,23 +212,50 @@ class PointsMaskEditor:
             neg_bboxes: List of [x1, y1, x2, y2] negative boxes.
             height: Canvas height.
             width: Canvas width.
+            softness: Edge feathering amount (0 = hard, >0 = Gaussian sigma in pixels).
 
         Returns:
             Modified [1, H, W] mask tensor.
         """
+        def _make_bbox_brush(x1, y1, x2, y2, h, w, sigma):
+            """Create a soft-edged rectangular brush."""
+            if sigma <= 0:
+                brush = torch.zeros(h, w, device=mask.device, dtype=mask.dtype)
+                brush[y1:y2, x1:x2] = 1.0
+                return brush
+            # Distance from inside of rect (0 inside, positive outside)
+            yy = torch.arange(h, device=mask.device, dtype=torch.float32)
+            xx = torch.arange(w, device=mask.device, dtype=torch.float32)
+            # Distance to nearest edge (negative = inside)
+            dy = torch.max(yy.unsqueeze(1).expand(h, w) - (y2 - 1),
+                           (y1).float() - yy.unsqueeze(1).expand(h, w)).clamp(min=0)
+            dx = torch.max(xx.unsqueeze(0).expand(h, w) - (x2 - 1),
+                           (x1).float() - xx.unsqueeze(0).expand(h, w)).clamp(min=0)
+            dist = torch.sqrt(dx ** 2 + dy ** 2)
+            brush = torch.exp(-dist ** 2 / (2.0 * sigma ** 2))
+            # Ensure fully 1.0 inside the rect
+            inner = torch.zeros_like(brush)
+            inner[y1:y2, x1:x2] = 1.0
+            brush = torch.max(brush, inner)
+            return brush.clamp(0.0, 1.0)
+
+        feather = softness * 3.0 if softness > 0 else 0.0
+
         for coords in pos_bboxes:
             x1, y1, x2, y2 = coords
             x1, y1 = max(0, min(x1, width)), max(0, min(y1, height))
             x2, y2 = max(0, min(x2, width)), max(0, min(y2, height))
             if x2 > x1 and y2 > y1:
-                mask[0, y1:y2, x1:x2] = 1.0
+                brush = _make_bbox_brush(x1, y1, x2, y2, height, width, feather)
+                mask[0] = torch.max(mask[0], brush)
 
         for coords in neg_bboxes:
             x1, y1, x2, y2 = coords
             x1, y1 = max(0, min(x1, width)), max(0, min(y1, height))
             x2, y2 = max(0, min(x2, width)), max(0, min(y2, height))
             if x2 > x1 and y2 > y1:
-                mask[0, y1:y2, x1:x2] = 0.0
+                brush = _make_bbox_brush(x1, y1, x2, y2, height, width, feather)
+                mask[0] = mask[0] * (1.0 - brush)
 
         return mask
 
@@ -310,7 +339,7 @@ class PointsMaskEditor:
 
         # Render points and bboxes via private helpers
         mask = self._render_point_brush(mask, all_points_raw, default_radius, softness, height, width, device)
-        mask = self._render_bbox_region(mask, pos_bboxes, neg_bboxes, height, width)
+        mask = self._render_bbox_region(mask, pos_bboxes, neg_bboxes, height, width, softness)
 
         if normalize:
             mask = mask.clamp(0.0, 1.0)

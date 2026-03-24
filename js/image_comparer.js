@@ -119,6 +119,15 @@ app.registerExtension({
                 serialize: false,
             });
             node.setSize([420, 380]);
+
+            // Lock compute size after initial setup to prevent jitter
+            let _lockedW = 420, _lockedH = 380;
+            const _origCompute = node.computeSize;
+            node.computeSize = function() {
+                if (_lockedW > 0 && _lockedH > 0) return [_lockedW, _lockedH];
+                return _origCompute?.apply(this, arguments) ?? [420, 380];
+            };
+            node._lockSize = (w, h) => { _lockedW = w; _lockedH = h; };
         };
 
         /* ── onExecuted ────────────────────────────────── */
@@ -146,7 +155,9 @@ app.registerExtension({
                 node._render();
                 const aspect = S.imgA.height / S.imgA.width;
                 const w = Math.max(node.size[0], 320);
-                node.setSize([w, Math.round((w - 20) * aspect) + 140]);
+                const h = Math.round((w - 20) * aspect) + 140;
+                node._lockSize?.(w, h);
+                node.setSize([w, h]);
                 app.graph.setDirtyCanvas(true);
             };
 

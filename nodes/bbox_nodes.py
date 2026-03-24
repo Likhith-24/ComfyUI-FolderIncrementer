@@ -200,3 +200,64 @@ class BBoxCrop:
         else:
             cropped_mask = torch.ones(B, y2 - y1, x2 - x1, dtype=torch.float32, device=image.device)
         return (cropped, cropped_mask, [x1, y1, x2 - x1, y2 - y1])
+
+
+class BBoxSmooth:
+    """Smooth a sequence of bounding boxes across video frames to reduce jitter."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "bboxes_json": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "JSON array of [x, y, w, h] bboxes, one per frame. e.g. [[10,20,100,100],[12,19,102,101],...]"}),
+                "smoothing_radius": ("INT", {
+                    "default": 3, "min": 1, "max": 30, "step": 1,
+                    "tooltip": "Temporal window radius for smoothing (higher = smoother but more lag)"}),
+                "method": (["moving_average", "exponential"], {
+                    "default": "moving_average",
+                    "tooltip": "Smoothing method: moving_average (uniform window) or exponential (recent frames weighted more)"}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "BBOX",)
+    RETURN_NAMES = ("smoothed_bboxes_json", "first_bbox",)
+    FUNCTION = "smooth"
+    CATEGORY = "MaskEditControl/BBox"
+    DESCRIPTION = "Smooth bounding boxes across video frames to eliminate jitter. Feed output back via SetNode for stable crops."
+
+    def smooth(self, bboxes_json, smoothing_radius, method):
+        try:
+            bboxes = json.loads(bboxes_json)
+        except (json.JSONDecodeError, TypeError):
+            bbox = [0, 0, 128, 128]
+            return (json.dumps([bbox]), bbox)
+
+        if not bboxes or not isinstance(bboxes, list):
+            bbox = [0, 0, 128, 128]
+            return (json.dumps([bbox]), bbox)
+
+        n = len(bboxes)
+        if n <= 1:
+            return (json.dumps(bboxes), bboxes[0] if bboxes else [0, 0, 128, 128])
+
+        smoothed = []
+        for i in range(n):
+            if method == "moving_average":
+                start = max(0, i - smoothing_radius)
+                end = min(n, i + smoothing_radius + 1)
+                window = bboxes[start:end]
+                avg = [sum(b[c] for b in window) / len(window) for c in range(4)]
+                smoothed.append([int(round(v)) for v in avg])
+            else:
+                # Exponential smoothing
+                alpha = 2.0 / (smoothing_radius + 1)
+                if i == 0:
+                    smoothed.append(list(bboxes[0]))
+                else:
+                    prev = smoothed[-1]
+                    cur = bboxes[i]
+                    smoothed.append([int(round(alpha * cur[c] + (1 - alpha) * prev[c])) for c in range(4)])
+
+        return (json.dumps(smoothed), smoothed[0])

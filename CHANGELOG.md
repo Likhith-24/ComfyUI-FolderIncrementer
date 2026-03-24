@@ -2,6 +2,85 @@
 
 All notable changes to ComfyUI-CustomNodePacks are documented here.
 
+## [1.5.0] – 2025-07-17
+
+### Added
+
+- **InpaintCropProMEC – Canvas Expansion** – crops near image edges now
+  extend beyond bounds via `F.pad(mode="replicate")`, producing perfectly
+  centered crops everywhere. Ported from lquesada/ComfyUI-Inpaint-CropAndStitch.
+- **InpaintCropProMEC – optional_context_mask** – new optional input: union
+  of context mask bbox with crop bbox to include surrounding context.
+- **InpaintCropProMEC – Iterative Hole-Filling** – `_fill_mask_holes` rewritten
+  with 14-threshold iterative approach using scipy `binary_closing` +
+  `binary_fill_holes` (with pure-torch fallback). Preserves gradient values
+  in soft masks.
+- **Stitch Data v2 Format** – new coordinate system: `ctc_x/y/w/h`
+  (crop-to-canvas) + `cto_x/y/w/h` (canvas-to-original) for perfect
+  reversal of canvas expansion in stitching.
+
+### Changed
+
+- **InpaintStitchProMEC** – v1/v2 dispatch: v2 uses canvas coordinates
+  for seamless compositing of expanded crops; v1 fallback preserved for
+  backward compatibility with existing workflows.
+- **InpaintPasteBackMEC** – updated for v2 stitch format with canvas
+  coordinate handling; v1 fallback preserved.
+- **Points Editor (JS)** – `computeSize` override prevents LiteGraph
+  relayout jitter; widget height computed from actual other-widget heights
+  instead of magic number; locked dimensions after image load.
+- **Image Comparer (JS)** – `computeSize` override prevents resize jitter
+  after image comparison loads.
+
+### Fixed
+
+- **unified_segmentation.py** – marked as DEPRECATED (dead module superseded
+  by unified_segmentation_node.py + model_manager.py). Prevents confusion
+  from divergent MODEL_REGISTRY.
+
+## [1.4.0] – 2025-07-16
+
+### Added
+
+- **InpaintCropProMEC** – 3 new mask preprocessing inputs from original
+  InpaintCropAndStitch: `mask_invert` (flip inpaint/keep regions),
+  `mask_fill_holes` (flood-fill enclosed gaps), `mask_hipass_filter`
+  (threshold out near-transparent noise).
+- **MaskBatchManager** – 2 new temporal operations for video workflows:
+  `smooth_temporal` (Gaussian blur along time axis to reduce flicker) and
+  `reduce_flicker` (median filter across frames to remove outliers).
+- **BBoxSmooth (MEC)** – new node to smooth bounding-box sequences across
+  video frames using moving-average or exponential smoothing, eliminating
+  jitter in tracked crops.
+
+### Changed
+
+- **InpaintCropProMEC** – crop centering rewrite: bbox now expands
+  symmetrically around the mask center, then clamps to image bounds. Fixes
+  asymmetric off-center crops when the mask is near image edges.
+- **Points Mask Editor (JS)** – complete toolbar UI overhaul: brighter
+  button colors, 11 px font, 36 px toolbar height, `textBaseline="middle"`
+  vertical centering, 120 ms active-state flash on click, wider separators,
+  higher-opacity pills.
+- **Points Mask Editor (Python)** – bbox rendering rewritten to use soft
+  Gaussian-edged brushes: positive bboxes use `torch.max(mask, brush)`
+  (additive, preserves soft point edges), negative bboxes use multiplicative
+  erase. Replaces hard `mask = 1.0` overwrite that destroyed soft blending.
+
+### Fixed
+
+- **utils.py** – `multi_scale_guided_refine` and `color_aware_refine` now
+  handle 2D grayscale input arrays (was IndexError when `img_np.ndim == 2`).
+- **model_manager.py** – float8 dtype comparison guarded with
+  `hasattr(torch, "float8_e4m3fn")` to prevent AttributeError on
+  PyTorch < 2.1.
+- **Points Editor (JS)** – fixed 4 memory leaks: `requestAnimationFrame` now
+  cancelled in `onRemoved`, resize debounce timer cleared, keyboard event
+  listener properly removed, complete cleanup chain on node deletion.
+- **InpaintCropProMEC** – `_resize_lanczos` fix for single-channel masks:
+  squeeze channel dim to 2D for PIL, restore after (was crashing with
+  `Cannot handle this data type: (1, 1, 1), |u1`).
+
 ## [1.3.1] – 2025-07-15
 
 ### Added

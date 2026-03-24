@@ -1,6 +1,6 @@
 """
 MaskBatchManager – Manipulate mask batches: slice, concat, repeat, pick
-specific frames, reverse, interleave.
+specific frames, reverse, interleave, temporal smoothing.
 """
 
 import torch
@@ -10,7 +10,7 @@ import torch.nn.functional as F
 class MaskBatchManager:
     """Utility node for managing mask batches (video mask sequences).
     Supports slicing, concatenation, repeating, picking frames,
-    and reordering."""
+    reordering, and temporal smoothing for video workflows."""
 
     OPERATIONS = [
         "slice",           # Extract a range of frames
@@ -22,6 +22,8 @@ class MaskBatchManager:
         "set_frame",       # Replace a specific frame
         "insert_frame",    # Insert a frame at position
         "remove_frame",    # Remove a frame at position
+        "smooth_temporal", # Gaussian blur across time axis to reduce flicker
+        "reduce_flicker",  # Median filter across time axis
     ]
 
     @classmethod
@@ -46,7 +48,7 @@ class MaskBatchManager:
     RETURN_NAMES = ("mask", "count",)
     FUNCTION = "manage"
     CATEGORY = "MaskEditControl/Batch"
-    DESCRIPTION = "Manage mask batches: slice, pick, repeat, reverse, concat, interleave, insert, remove."
+    DESCRIPTION = "Manage mask batches: slice, pick, repeat, reverse, concat, interleave, insert, remove, temporal smoothing."
 
     def manage(self, mask, operation, param_a, param_b, frame_indices, mask_b=None):
         m = mask.clone()
@@ -138,6 +140,45 @@ class MaskBatchManager:
         elif operation == "remove_frame":
             idx = min(param_a, m.shape[0] - 1)
             out = torch.cat([m[:idx], m[idx+1:]], dim=0) if m.shape[0] > 1 else m
+
+        elif operation == "smooth_temporal":
+            # Gaussian blur along the time (batch) dimension to reduce frame-to-frame flicker
+            # param_a = temporal radius (default to 2 if 0)
+            radius = max(1, param_a) if param_a > 0 else 2
+            if m.shape[0] <= 1:
+                out = m
+            else:
+                sigma = radius / 2.0
+                k_size = 2 * radius + 1
+                t = torch.arange(k_size, dtype=torch.float32, device=m.device) - radius
+                kernel = torch.exp(-0.5 * (t / max(sigma, 0.5)) ** 2)
+                kernel = kernel / kernel.sum()
+                # Reshape: (B, H, W) → (H*W, 1, B) for 1D conv along time
+                B, H, W = m.shape
+                flat = m.permute(1, 2, 0).reshape(H * W, 1, B)
+                padded = F.pad(flat, (radius, radius), mode="reflect")
+                smoothed = F.conv1d(padded, kernel.view(1, 1, -1))
+                out = smoothed.reshape(H, W, B).permute(2, 0, 1).clamp(0, 1)
+
+        elif operation == "reduce_flicker":
+            # Median filter along time axis to remove single-frame outliers
+            # param_a = window size (default to 3 if 0)
+            window = max(3, param_a) if param_a > 0 else 3
+            if window % 2 == 0:
+                window += 1
+            if m.shape[0] <= 2:
+                out = m
+            else:
+                B, H, W = m.shape
+                half = window // 2
+                padded = F.pad(m.unsqueeze(0).unsqueeze(0),
+                               (0, 0, 0, 0, half, half), mode="reflect").squeeze(0).squeeze(0)
+                frames = []
+                for i in range(B):
+                    window_slice = padded[i:i + window]
+                    frames.append(window_slice.median(dim=0).values)
+                out = torch.stack(frames, dim=0)
+
         else:
             out = m
 

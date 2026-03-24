@@ -32,7 +32,7 @@ from .nodes.sam_model_loader import SAMModelLoaderMEC
 from .nodes.sam_mask_generator import SAMMaskGeneratorMEC
 from .nodes.mask_batch_manager import MaskBatchManager
 from .nodes.mask_math import MaskMath
-from .nodes.bbox_nodes import BBoxCreate, BBoxFromMask, BBoxToMask, BBoxPad, BBoxCrop
+from .nodes.bbox_nodes import BBoxCreate, BBoxFromMask, BBoxToMask, BBoxPad, BBoxCrop, BBoxSmooth
 from .nodes.vitmatte_refiner import ViTMatteRefinerMEC
 from .nodes.sam_vitmatte_pipeline import SAMViTMattePipelineMEC
 from .nodes.trimap_generator import TrimapGeneratorMEC
@@ -67,6 +67,7 @@ _MEC_MAPPINGS = {
     "BBoxToMask": BBoxToMask,
     "BBoxPad": BBoxPad,
     "BBoxCrop": BBoxCrop,
+    "BBoxSmooth": BBoxSmooth,
     "ViTMatteRefinerMEC": ViTMatteRefinerMEC,
     "SAMViTMattePipelineMEC": SAMViTMattePipelineMEC,
     "TrimapGeneratorMEC": TrimapGeneratorMEC,
@@ -105,6 +106,7 @@ _MEC_DISPLAY = {
     "BBoxToMask": "BBox To Mask (MEC)",
     "BBoxPad": "BBox Pad (MEC)",
     "BBoxCrop": "BBox Crop (MEC)",
+    "BBoxSmooth": "BBox Smooth Temporal (MEC)",
     "ViTMatteRefinerMEC": "ViTMatte Edge Refiner (MEC)",
     "SAMViTMattePipelineMEC": "SAM + ViTMatte Pipeline (MEC)",
     "TrimapGeneratorMEC": "Trimap Generator (MEC)",

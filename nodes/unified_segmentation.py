@@ -1,4 +1,9 @@
 """
+DEPRECATED – This module is superseded by unified_segmentation_node.py + model_manager.py.
+Kept for reference only. Do NOT import this module in production code.
+The canonical MODEL_REGISTRY and model loading live in model_manager.py.
+
+Original description:
 UnifiedSegmentation – One node for SAM2/2.1, SAM3, and SeC segmentation.
 
 Image mode (B=1):  point/bbox prompts → mask

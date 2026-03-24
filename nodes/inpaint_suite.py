@@ -35,6 +35,12 @@ try:
 except ImportError:
     HAS_CV2 = False
 
+try:
+    from scipy.ndimage import binary_closing, binary_fill_holes
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+
 logger = logging.getLogger("MEC")
 
 
@@ -739,6 +745,19 @@ class InpaintCropProMEC:
                 "custom_aspect_h": ("INT", {
                     "default": 1, "min": 1, "max": 100, "step": 1,
                     "tooltip": "Height component of custom aspect ratio"}),
+                "mask_invert": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Invert the mask before processing (swap inpaint/keep regions)"}),
+                "mask_fill_holes": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Fill enclosed holes inside the mask (prevents gaps from breaking inpainting)"}),
+                "mask_hipass_filter": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Ignore mask values below this threshold (removes near-transparent noise)"}),
+            },
+            "optional": {
+                "optional_context_mask": ("MASK", {
+                    "tooltip": "Extra mask defining additional context area to include in the crop (does not affect inpainting, only crop bounds)"}),
             },
         }
 
@@ -766,6 +785,55 @@ class InpaintCropProMEC:
         if len(parts) == 2:
             return (int(parts[0]), int(parts[1]))
         return None
+
+    @staticmethod
+    def _fill_mask_holes(mask: torch.Tensor) -> torch.Tensor:
+        """Fill enclosed holes inside mask using iterative multi-threshold approach.
+
+        Uses scipy binary_closing + binary_fill_holes at descending thresholds
+        to properly handle soft/gradient masks (lquesada's proven method).
+        Falls back to simple binary flood-fill when scipy is not available.
+        """
+        if HAS_SCIPY:
+            results = []
+            thresholds = [1, 0.99, 0.97, 0.95, 0.93, 0.9, 0.8, 0.7, 0.6, 0.5,
+                          0.4, 0.3, 0.2, 0.1]
+            for b in range(mask.shape[0]):
+                mask_np = mask[b].cpu().numpy()
+                for threshold in thresholds:
+                    thresholded = mask_np >= threshold
+                    closed = binary_closing(thresholded,
+                                            structure=np.ones((3, 3)),
+                                            border_value=1)
+                    filled = binary_fill_holes(closed)
+                    mask_np = np.maximum(mask_np,
+                                         np.where(filled != 0, threshold, 0))
+                results.append(torch.from_numpy(mask_np.astype(np.float32)))
+            return torch.stack(results, dim=0).to(mask.device)
+
+        # Torch-only fallback: simple binary flood-fill from borders
+        filled = mask.clone()
+        for b in range(filled.shape[0]):
+            m = filled[b]
+            binary = (m > 0.5).float()
+            bg = torch.zeros_like(binary)
+            H, W = binary.shape
+            bg[0, :] = 1.0 - binary[0, :]
+            bg[-1, :] = 1.0 - binary[-1, :]
+            bg[:, 0] = torch.max(bg[:, 0], 1.0 - binary[:, 0])
+            bg[:, -1] = torch.max(bg[:, -1], 1.0 - binary[:, -1])
+            inv = 1.0 - binary
+            kernel = torch.ones(1, 1, 3, 3, device=mask.device) / 9.0
+            for _ in range(max(H, W)):
+                prev = bg
+                padded = F.pad(bg.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1),
+                               mode="constant", value=0)
+                bg = (F.conv2d(padded, kernel).squeeze(0).squeeze(0) > 0.01).float() * inv
+                if torch.equal(bg, prev):
+                    break
+            holes = (1.0 - binary) * (1.0 - bg)
+            filled[b] = torch.max(m, holes)
+        return filled
 
     @staticmethod
     def _grow_mask(mask: torch.Tensor, pixels: int) -> torch.Tensor:
@@ -797,7 +865,10 @@ class InpaintCropProMEC:
                          upscale_method: str = "lanczos",
                          mask_blur: float = 0.0, mask_grow: int = 0,
                          aspect_ratio: str = "none",
-                         custom_aspect_w: int = 1, custom_aspect_h: int = 1):
+                         custom_aspect_w: int = 1, custom_aspect_h: int = 1,
+                         mask_invert: bool = False, mask_fill_holes: bool = False,
+                         mask_hipass_filter: float = 0.0,
+                         optional_context_mask: Optional[torch.Tensor] = None):
         device = _get_device(image)
         B, H, W, C = image.shape
 
@@ -809,34 +880,62 @@ class InpaintCropProMEC:
         if mask.shape[1] != H or mask.shape[2] != W:
             mask = _resize_mask(mask, H, W)
 
-        # ── Mask pre-processing: grow/shrink then blur ─────────────────
+        # Prepare optional context mask
+        if optional_context_mask is not None:
+            if optional_context_mask.dim() == 2:
+                optional_context_mask = optional_context_mask.unsqueeze(0)
+            if optional_context_mask.shape[0] == 1 and B > 1:
+                optional_context_mask = optional_context_mask.expand(B, -1, -1).clone()
+            if optional_context_mask.shape[1] != H or optional_context_mask.shape[2] != W:
+                optional_context_mask = _resize_mask(optional_context_mask, H, W)
+
+        # ── Mask pre-processing: invert, hipass, fill holes, grow, blur ──
+        if mask_invert:
+            mask = 1.0 - mask
+        if mask_hipass_filter > 0:
+            mask = torch.where(mask >= mask_hipass_filter, mask, torch.zeros_like(mask))
+        if mask_fill_holes:
+            mask = self._fill_mask_holes(mask)
         if mask_grow != 0:
             mask = self._grow_mask(mask, mask_grow)
         if mask_blur > 0:
             mask = _gaussian_blur_mask(mask, sigma=mask_blur).clamp(0.0, 1.0)
 
         # Step 1: Compute bounding box
-        if video_stable_crop and B > 1:
-            bbox_x, bbox_y, bbox_w, bbox_h = _compute_stable_bbox(mask)
-        else:
-            bbox_x, bbox_y, bbox_w, bbox_h = _compute_stable_bbox(mask)
+        bbox_x, bbox_y, bbox_w, bbox_h = _compute_stable_bbox(mask)
 
         # Handle empty mask
         if bbox_w <= 0 or bbox_h <= 0:
             bbox_x, bbox_y, bbox_w, bbox_h = 0, 0, W, H
 
-        # Step 2: Expand bbox by context_expand
-        expand_w = int(bbox_w * (context_expand - 1.0) / 2.0)
-        expand_h = int(bbox_h * (context_expand - 1.0) / 2.0)
-        crop_x = max(0, bbox_x - expand_w)
-        crop_y = max(0, bbox_y - expand_h)
-        crop_x2 = min(W, bbox_x + bbox_w + expand_w)
-        crop_y2 = min(H, bbox_y + bbox_h + expand_h)
-        crop_w = crop_x2 - crop_x
-        crop_h = crop_y2 - crop_y
+        # Step 2: Expand bbox by context_expand, always centered on mask
+        center_x = bbox_x + bbox_w / 2.0
+        center_y = bbox_y + bbox_h / 2.0
+
+        crop_w = int(round(bbox_w * context_expand))
+        crop_h = int(round(bbox_h * context_expand))
 
         if crop_w <= 0 or crop_h <= 0:
-            crop_x, crop_y, crop_w, crop_h = 0, 0, W, H
+            crop_w, crop_h = W, H
+            center_x, center_y = W / 2.0, H / 2.0
+
+        # Combine with optional_context_mask bbox (lquesada pattern)
+        if optional_context_mask is not None:
+            ctx_bbox = _compute_stable_bbox(optional_context_mask)
+            if ctx_bbox[2] > 0 and ctx_bbox[3] > 0:
+                # Union the expanded crop bbox with the context mask bbox
+                cx1, cy1 = int(round(center_x - crop_w / 2.0)), int(round(center_y - crop_h / 2.0))
+                cx2, cy2 = cx1 + crop_w, cy1 + crop_h
+                ox1, oy1 = ctx_bbox[0], ctx_bbox[1]
+                ox2, oy2 = ox1 + ctx_bbox[2], oy1 + ctx_bbox[3]
+                ux1 = min(cx1, ox1)
+                uy1 = min(cy1, oy1)
+                ux2 = max(cx2, ox2)
+                uy2 = max(cy2, oy2)
+                crop_w = ux2 - ux1
+                crop_h = uy2 - uy1
+                center_x = ux1 + crop_w / 2.0
+                center_y = uy1 + crop_h / 2.0
 
         # ── Enforce aspect ratio on crop region ────────────────────────
         ar = self._parse_aspect_ratio(aspect_ratio, custom_aspect_w, custom_aspect_h)
@@ -845,27 +944,13 @@ class InpaintCropProMEC:
             target_ar = ar_w / ar_h
             current_ar = crop_w / max(crop_h, 1)
             if current_ar > target_ar:
-                # Too wide — increase height
-                new_h = int(round(crop_w / target_ar))
-                diff = new_h - crop_h
-                crop_y = max(0, crop_y - diff // 2)
-                crop_h = new_h
-                if crop_y + crop_h > H:
-                    crop_y = max(0, H - crop_h)
-                    crop_h = min(crop_h, H - crop_y)
+                crop_h = int(round(crop_w / target_ar))
             else:
-                # Too tall — increase width
-                new_w = int(round(crop_h * target_ar))
-                diff = new_w - crop_w
-                crop_x = max(0, crop_x - diff // 2)
-                crop_w = new_w
-                if crop_x + crop_w > W:
-                    crop_x = max(0, W - crop_w)
-                    crop_w = min(crop_w, W - crop_x)
+                crop_w = int(round(crop_h * target_ar))
 
-        # Snap crop dimensions to padding_multiple
-        crop_w = min(self._snap(crop_w, padding_multiple), W - crop_x)
-        crop_h = min(self._snap(crop_h, padding_multiple), H - crop_y)
+        # Snap crop dimensions to padding_multiple (expand, not shrink)
+        crop_w = self._snap(crop_w, padding_multiple)
+        crop_h = self._snap(crop_h, padding_multiple)
 
         # Step 3: Compute target output size
         target_w, target_h = _apply_size_mode(
@@ -874,14 +959,67 @@ class InpaintCropProMEC:
             min_size, max_size, padding_multiple
         )
 
+        # When forced_size, align crop aspect ratio to target
+        if size_mode == "forced_size" and target_w > 0 and target_h > 0:
+            target_ar = target_w / target_h
+            current_ar = crop_w / max(crop_h, 1)
+            if current_ar < target_ar:
+                crop_w = self._snap(int(round(crop_h * target_ar)), padding_multiple)
+            else:
+                crop_h = self._snap(int(round(crop_w / target_ar)), padding_multiple)
+
         # Apply downscale factor
         if downscale_factor < 1.0:
             target_w = max(padding_multiple, self._snap(int(target_w * downscale_factor), padding_multiple))
             target_h = max(padding_multiple, self._snap(int(target_h * downscale_factor), padding_multiple))
 
-        # Step 4: Crop image and mask
-        cropped = image[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :].clone()
-        cropped_mask = mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w].clone()
+        # Step 4: Position crop centered on mask (allow extending beyond image)
+        crop_x = int(round(center_x - crop_w / 2.0))
+        crop_y = int(round(center_y - crop_h / 2.0))
+
+        # Calculate canvas padding for out-of-bounds regions
+        left_pad = max(0, -crop_x)
+        top_pad = max(0, -crop_y)
+        right_pad = max(0, (crop_x + crop_w) - W)
+        bottom_pad = max(0, (crop_y + crop_h) - H)
+        needs_expansion = left_pad > 0 or top_pad > 0 or right_pad > 0 or bottom_pad > 0
+
+        if needs_expansion:
+            # Build expanded canvas with edge-replicated borders (lquesada pattern)
+            img_bchw = image.permute(0, 3, 1, 2)  # (B, C, H, W)
+            canvas_bchw = F.pad(img_bchw,
+                                (left_pad, right_pad, top_pad, bottom_pad),
+                                mode="replicate")
+            canvas_image = canvas_bchw.permute(0, 2, 3, 1)  # (B, exp_H, exp_W, C)
+
+            # Mask canvas: expanded areas are 1.0 (masked)
+            exp_H = H + top_pad + bottom_pad
+            exp_W = W + left_pad + right_pad
+            canvas_mask = torch.ones(B, exp_H, exp_W, device=device, dtype=mask.dtype)
+            canvas_mask[:, top_pad:top_pad + H, left_pad:left_pad + W] = mask
+
+            # Coordinates in canvas space
+            cto_x, cto_y, cto_w, cto_h = left_pad, top_pad, W, H
+            ctc_x = crop_x + left_pad
+            ctc_y = crop_y + top_pad
+
+            # Crop from canvas
+            cropped = canvas_image[:, ctc_y:ctc_y + crop_h, ctc_x:ctc_x + crop_w, :].clone()
+            cropped_mask = canvas_mask[:, ctc_y:ctc_y + crop_h, ctc_x:ctc_x + crop_w].clone()
+        else:
+            # No expansion needed — clamp and crop directly
+            crop_x = max(0, min(crop_x, W - crop_w))
+            crop_y = max(0, min(crop_y, H - crop_h))
+            # Ensure crop doesn't exceed image
+            crop_w = min(crop_w, W - crop_x)
+            crop_h = min(crop_h, H - crop_y)
+
+            canvas_image = image
+            cto_x, cto_y, cto_w, cto_h = 0, 0, W, H
+            ctc_x, ctc_y = crop_x, crop_y
+
+            cropped = image[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :].clone()
+            cropped_mask = mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w].clone()
 
         # Step 5: Fill masked area in crop
         if fill_masked_area == "neutral_gray":
@@ -889,8 +1027,8 @@ class InpaintCropProMEC:
             binary_3d = (cropped_mask > 0.5).float().unsqueeze(-1)
             cropped = cropped * (1.0 - binary_3d) + fill_value * binary_3d
         elif fill_masked_area == "edge_pad":
-            img_bchw = cropped.permute(0, 3, 1, 2)
-            blurred_fill = _gaussian_blur_2d(img_bchw, sigma=max(crop_w, crop_h) * 0.15)
+            img_bchw_fill = cropped.permute(0, 3, 1, 2)
+            blurred_fill = _gaussian_blur_2d(img_bchw_fill, sigma=max(crop_w, crop_h) * 0.15)
             blurred_fill = blurred_fill.permute(0, 2, 3, 1)
             binary_3d = (cropped_mask > 0.5).float().unsqueeze(-1)
             cropped = cropped * (1.0 - binary_3d) + blurred_fill * binary_3d
@@ -917,31 +1055,41 @@ class InpaintCropProMEC:
 
         # Step 8.6: Generate crop_mask (binary mask showing cropped region in original image space)
         crop_mask = torch.zeros(B, H, W, device=device, dtype=torch.float32)
-        crop_mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w] = 1.0
+        # Map canvas crop back to original image space
+        orig_y1 = max(0, ctc_y - cto_y)
+        orig_y2 = min(H, ctc_y + crop_h - cto_y)
+        orig_x1 = max(0, ctc_x - cto_x)
+        orig_x2 = min(W, ctc_x + crop_w - cto_x)
+        if orig_y2 > orig_y1 and orig_x2 > orig_x1:
+            crop_mask[:, orig_y1:orig_y2, orig_x1:orig_x2] = 1.0
 
-        # Step 9: Build stitch_data dict
+        # Step 9: Build stitch_data dict (v2 format with canvas coordinates)
         stitch_data = {
-            "original_image": image,
-            "crop_x": crop_x,
-            "crop_y": crop_y,
-            "crop_w": crop_w,
-            "crop_h": crop_h,
-            "target_w": target_w,
-            "target_h": target_h,
+            "version": 2,
+            "canvas_image": canvas_image.cpu(),
+            "cto_x": cto_x, "cto_y": cto_y,
+            "cto_w": cto_w, "cto_h": cto_h,
+            "ctc_x": ctc_x, "ctc_y": ctc_y,
+            "ctc_w": crop_w, "ctc_h": crop_h,
+            "target_w": target_w, "target_h": target_h,
             "blend_mode": stitch_blend_mode,
             "blend_radius": blend_radius,
-            "stitch_blend_mask_crop": stitch_blend_mask,
-            "original_mask": mask,
+            "stitch_blend_mask_crop": stitch_blend_mask.cpu(),
+            "original_mask": mask.cpu(),
             "downscale_factor": downscale_factor,
             "upscale_method": upscale_method,
+            "downscale_method": downscale_method,
         }
 
         # Step 10: Build info string
+        expansion_info = ""
+        if needs_expansion:
+            expansion_info = f"\n  canvas expansion: L={left_pad} T={top_pad} R={right_pad} B={bottom_pad}"
         info_lines = [
             f"InpaintCropProMEC:",
             f"  image: {B}x{H}x{W}x{C}",
             f"  mask bbox: x={bbox_x}, y={bbox_y}, w={bbox_w}, h={bbox_h}",
-            f"  crop region: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}",
+            f"  crop region: {crop_w}x{crop_h} centered at ({center_x:.0f},{center_y:.0f})",
             f"  context_expand: {context_expand:.2f}",
             f"  aspect_ratio: {aspect_ratio}",
             f"  downscale_factor: {downscale_factor:.2f}",
@@ -953,6 +1101,7 @@ class InpaintCropProMEC:
             f"  fill_masked_area: {fill_masked_area}",
             f"  inpaint_mask range: [{inpaint_mask.min().item():.4f}, {inpaint_mask.max().item():.4f}]",
             f"  blend_mask range: [{stitch_blend_mask.min().item():.4f}, {stitch_blend_mask.max().item():.4f}]",
+            expansion_info,
         ]
         info = "\n".join(info_lines)
 
@@ -995,13 +1144,113 @@ class InpaintStitchProMEC:
 
     def stitch(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
                blend_mode_override: str, color_match: bool):
+        version = stitch_data.get("version", 1)
+        if version >= 2:
+            return self._stitch_v2(stitch_data, inpainted_image,
+                                   blend_mode_override, color_match)
+        return self._stitch_v1(stitch_data, inpainted_image,
+                               blend_mode_override, color_match)
+
+    def _stitch_v2(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
+                   blend_mode_override: str, color_match: bool):
+        """V2 stitch: uses canvas coordinates for perfect reversal of canvas expansion."""
+        canvas_image = stitch_data["canvas_image"]
+        ctc_x = stitch_data["ctc_x"]
+        ctc_y = stitch_data["ctc_y"]
+        ctc_w = stitch_data["ctc_w"]
+        ctc_h = stitch_data["ctc_h"]
+        cto_x = stitch_data["cto_x"]
+        cto_y = stitch_data["cto_y"]
+        cto_w = stitch_data["cto_w"]
+        cto_h = stitch_data["cto_h"]
+        stored_blend_mode = stitch_data["blend_mode"]
+        blend_radius = stitch_data["blend_radius"]
+        stitch_blend_mask_crop = stitch_data["stitch_blend_mask_crop"]
+        upscale_method = stitch_data.get("upscale_method", "lanczos")
+
+        device = _get_device(inpainted_image)
+        canvas = canvas_image.to(device).clone()
+        B = inpainted_image.shape[0]
+
+        blend_mode = stored_blend_mode if blend_mode_override == "from_crop" else blend_mode_override
+
+        # Resize inpainted to crop region dimensions in canvas
+        inp_resized = _resize_image(inpainted_image, ctc_h, ctc_w, mode=upscale_method)
+
+        # Resize blend mask to crop region dimensions
+        blend_mask_crop = _resize_mask(stitch_blend_mask_crop.to(device), ctc_h, ctc_w, mode=upscale_method)
+
+        # Regenerate blend mask if overridden
+        if blend_mode_override != "from_crop" and blend_mode_override != stored_blend_mode:
+            canvas_crop_region = canvas[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :]
+            original_mask = stitch_data.get("original_mask")
+            if original_mask is not None:
+                crop_mask = _resize_mask(original_mask.to(device), ctc_h, ctc_w)
+            else:
+                crop_mask = (blend_mask_crop > 0.5).float()
+            blend_mask_crop = _generate_stitch_blend_mask(
+                canvas_crop_region, crop_mask, blend_mode, blend_radius
+            )
+
+        # Optional color matching against canvas context
+        if color_match:
+            canvas_context = canvas[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :].clone()
+            color_mask = (blend_mask_crop > 0.1).float()
+            inp_resized = _color_match_mean_std(inp_resized, canvas_context, color_mask)
+
+        # Composite: blend inpainted onto canvas at crop position
+        canvas_crop = canvas[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :].clone()
+
+        if blend_mode == "laplacian_pyramid":
+            a_bchw = canvas_crop.permute(0, 3, 1, 2)
+            b_bchw = inp_resized.permute(0, 3, 1, 2)
+            m_b1hw = blend_mask_crop.unsqueeze(1)
+            blended = _laplacian_pyramid_blend(a_bchw, b_bchw, m_b1hw, levels=5)
+            blended = blended.permute(0, 2, 3, 1).clamp(0.0, 1.0)
+        elif blend_mode == "frequency_blend":
+            a_bchw = canvas_crop.permute(0, 3, 1, 2)
+            b_bchw = inp_resized.permute(0, 3, 1, 2)
+            m_b1hw = blend_mask_crop.unsqueeze(1)
+            blended = _frequency_blend(a_bchw, b_bchw, m_b1hw)
+            blended = blended.permute(0, 2, 3, 1).clamp(0.0, 1.0)
+        else:
+            m3 = blend_mask_crop.unsqueeze(-1)
+            blended = canvas_crop * (1.0 - m3) + inp_resized * m3
+
+        canvas[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :] = blended
+
+        # Extract original image region from canvas (reverses expansion)
+        output = canvas[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w, :].clamp(0.0, 1.0)
+
+        # Build blend mask in original image space
+        H, W = cto_h, cto_w
+        blend_canvas = torch.zeros(B, canvas.shape[1], canvas.shape[2],
+                                   device=device, dtype=canvas.dtype)
+        blend_canvas[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w] = blend_mask_crop
+        blend_mask_full = blend_canvas[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w]
+
+        color_info = "\n  color_match: applied" if color_match else ""
+        info = (
+            f"InpaintStitchProMEC (v2):\n"
+            f"  canvas: {canvas_image.shape[1]}x{canvas_image.shape[2]}\n"
+            f"  crop→canvas: x={ctc_x}, y={ctc_y}, w={ctc_w}, h={ctc_h}\n"
+            f"  orig→canvas: x={cto_x}, y={cto_y}, w={cto_w}, h={cto_h}\n"
+            f"  blend_mode: {blend_mode}"
+            + (" (overridden)" if blend_mode_override != "from_crop" else " (from_crop)")
+            + f"\n  output: {B}x{H}x{W}"
+            + color_info
+        )
+
+        return (output, blend_mask_full, info)
+
+    def _stitch_v1(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
+                   blend_mode_override: str, color_match: bool):
+        """V1 stitch: legacy format with direct crop coordinates."""
         original_image = stitch_data["original_image"]
         crop_x = stitch_data["crop_x"]
         crop_y = stitch_data["crop_y"]
         crop_w = stitch_data["crop_w"]
         crop_h = stitch_data["crop_h"]
-        target_w = stitch_data["target_w"]
-        target_h = stitch_data["target_h"]
         stored_blend_mode = stitch_data["blend_mode"]
         blend_radius = stitch_data["blend_radius"]
         stitch_blend_mask_crop = stitch_data["stitch_blend_mask_crop"]
@@ -1011,16 +1260,11 @@ class InpaintStitchProMEC:
         device = _get_device(original_image)
         B, H, W, C = original_image.shape
 
-        # Determine effective blend mode
         blend_mode = stored_blend_mode if blend_mode_override == "from_crop" else blend_mode_override
 
-        # Resize inpainted image to crop dimensions
         inp_resized = _resize_image(inpainted_image, crop_h, crop_w, mode=upscale_method)
-
-        # Resize blend mask to crop dimensions
         blend_mask_crop = _resize_mask(stitch_blend_mask_crop, crop_h, crop_w, mode=upscale_method)
 
-        # Regenerate blend mask if override differs from stored
         if blend_mode_override != "from_crop" and blend_mode_override != stored_blend_mode:
             crop_region = original_image[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :]
             crop_mask = original_mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
@@ -1028,57 +1272,42 @@ class InpaintStitchProMEC:
                 crop_region, crop_mask, blend_mode, blend_radius
             )
 
-        # Optional color matching
         if color_match:
             crop_original = original_image[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :].clone()
             crop_mask_for_color = original_mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
             inp_resized = _color_match_mean_std(inp_resized, crop_original, crop_mask_for_color)
 
-        # Clone the original for compositing
         canvas = original_image.clone()
         canvas_crop = canvas[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :].clone()
 
-        # Composite based on blend mode
         if blend_mode == "laplacian_pyramid":
             a_bchw = canvas_crop.permute(0, 3, 1, 2)
             b_bchw = inp_resized.permute(0, 3, 1, 2)
             m_b1hw = blend_mask_crop.unsqueeze(1)
             blended_bchw = _laplacian_pyramid_blend(a_bchw, b_bchw, m_b1hw, levels=5)
             blended = blended_bchw.permute(0, 2, 3, 1).clamp(0.0, 1.0)
-
         elif blend_mode == "frequency_blend":
             a_bchw = canvas_crop.permute(0, 3, 1, 2)
             b_bchw = inp_resized.permute(0, 3, 1, 2)
             m_b1hw = blend_mask_crop.unsqueeze(1)
             blended_bchw = _frequency_blend(a_bchw, b_bchw, m_b1hw)
             blended = blended_bchw.permute(0, 2, 3, 1).clamp(0.0, 1.0)
-
         else:
             m3 = blend_mask_crop.unsqueeze(-1)
             blended = canvas_crop * (1.0 - m3) + inp_resized * m3
 
-        # Paste blended region back
         canvas[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :] = blended
-
-        # Create full-res blend mask for output
         blend_mask_full = torch.zeros(B, H, W, device=device, dtype=original_image.dtype)
         blend_mask_full[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w] = blend_mask_crop
 
-        # Build info string
-        color_info = ""
-        if color_match:
-            color_info = "\n  color_match: applied"
-
-        info_lines = [
-            f"InpaintStitchProMEC:",
-            f"  stitch region: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}",
-            f"  blend_mode: {blend_mode}" + (" (overridden)" if blend_mode_override != "from_crop" else " (from_crop)"),
-            f"  inpainted_input: {inpainted_image.shape[0]}x{inpainted_image.shape[1]}x{inpainted_image.shape[2]}x{inpainted_image.shape[3]}",
-            f"  blend_mask range: [{blend_mask_crop.min().item():.4f}, {blend_mask_crop.max().item():.4f}]",
-            f"  output: {B}x{H}x{W}x{C}",
-            color_info,
-        ]
-        info = "\n".join(info_lines)
+        color_info = "\n  color_match: applied" if color_match else ""
+        info = (
+            f"InpaintStitchProMEC (v1):\n"
+            f"  stitch region: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}\n"
+            f"  blend_mode: {blend_mode}\n"
+            f"  output: {B}x{H}x{W}x{C}"
+            + color_info
+        )
 
         return (canvas, blend_mask_full, info)
 
@@ -1272,26 +1501,61 @@ class InpaintPasteBackMEC:
 
     def paste_back(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
                    upscale_method: str, feather_edges: bool, feather_radius: int):
+        version = stitch_data.get("version", 1)
+        device = _get_device(inpainted_image)
+
+        if version >= 2:
+            canvas_image = stitch_data["canvas_image"].to(device)
+            ctc_x = stitch_data["ctc_x"]
+            ctc_y = stitch_data["ctc_y"]
+            ctc_w = stitch_data["ctc_w"]
+            ctc_h = stitch_data["ctc_h"]
+            cto_x = stitch_data["cto_x"]
+            cto_y = stitch_data["cto_y"]
+            cto_w = stitch_data["cto_w"]
+            cto_h = stitch_data["cto_h"]
+
+            B = inpainted_image.shape[0]
+            inp_resized = _resize_image(inpainted_image, ctc_h, ctc_w, mode=upscale_method)
+            canvas = canvas_image.clone()
+
+            if feather_edges and feather_radius > 0:
+                paste_mask = torch.ones(1, 1, ctc_h, ctc_w, device=device, dtype=torch.float32)
+                paste_mask = _gaussian_blur_2d(paste_mask, sigma=feather_radius)
+                pm3 = paste_mask.squeeze(0).squeeze(0).unsqueeze(-1)
+                for b in range(B):
+                    crop = canvas[b, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :]
+                    canvas[b, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :] = (
+                        crop * (1.0 - pm3) + inp_resized[b] * pm3
+                    )
+            else:
+                canvas[:, ctc_y:ctc_y + ctc_h, ctc_x:ctc_x + ctc_w, :] = inp_resized
+
+            output = canvas[:, cto_y:cto_y + cto_h, cto_x:cto_x + cto_w, :]
+            info = (
+                f"InpaintPasteBackMEC (v2):\n"
+                f"  crop→canvas: x={ctc_x}, y={ctc_y}, w={ctc_w}, h={ctc_h}\n"
+                f"  output: {B}x{cto_h}x{cto_w}\n"
+                f"  upscale_method: {upscale_method}\n"
+                f"  feather_edges: {feather_edges}, radius={feather_radius}"
+            )
+            return (output.clamp(0, 1), info)
+
+        # V1 fallback
         original_image = stitch_data["original_image"]
         crop_x = stitch_data["crop_x"]
         crop_y = stitch_data["crop_y"]
         crop_w = stitch_data["crop_w"]
         crop_h = stitch_data["crop_h"]
 
-        device = _get_device(original_image)
         B, H, W, C = original_image.shape
-
-        # Resize inpainted crop to match crop region dimensions
         inp_resized = _resize_image(inpainted_image, crop_h, crop_w, mode=upscale_method)
-
         canvas = original_image.clone()
 
         if feather_edges and feather_radius > 0:
-            # Create a mask that is 1.0 inside and feathered at edges
             paste_mask = torch.ones(1, 1, crop_h, crop_w, device=device, dtype=torch.float32)
             paste_mask = _gaussian_blur_2d(paste_mask, sigma=feather_radius)
-            paste_mask = paste_mask.squeeze(0).squeeze(0)  # (crop_h, crop_w)
-            paste_mask_3d = paste_mask.unsqueeze(-1)  # (crop_h, crop_w, 1)
+            paste_mask_3d = paste_mask.squeeze(0).squeeze(0).unsqueeze(-1)
             for b in range(B):
                 orig_crop = canvas[b, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :]
                 canvas[b, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :] = (
@@ -1301,11 +1565,10 @@ class InpaintPasteBackMEC:
             canvas[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :] = inp_resized
 
         info = (
-            f"InpaintPasteBackMEC:\n"
+            f"InpaintPasteBackMEC (v1):\n"
             f"  paste region: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}\n"
             f"  upscale_method: {upscale_method}\n"
             f"  feather_edges: {feather_edges}, radius={feather_radius}\n"
-            f"  inpainted input: {inpainted_image.shape}\n"
             f"  output: {B}x{H}x{W}x{C}"
         )
 

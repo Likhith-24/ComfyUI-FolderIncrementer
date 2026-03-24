@@ -23,11 +23,11 @@
 
 ## Overview
 
-**ComfyUI-CustomNodePacks** ships **36 nodes** organized into four packs:
+**ComfyUI-CustomNodePacks** ships **38 nodes** organized into four packs:
 
 | Pack | Nodes | Purpose |
 |------|------:|---------|
-| **MaskEditControl (MEC)** | 31 | Pinpoint mask editing, SAM1/2/3 segmentation, SAM multi-mask picker, SeC + MatAnyone2 pipeline, background removal, face/clothes parsing, ViTMatte alpha matting, luminance keying, inpaint crop/stitch suite, mask failure diagnostics, temporal anchor interpolation, video propagation, compositing tools |
+| **MaskEditControl (MEC)** | 33 | Pinpoint mask editing, SAM1/2/3 segmentation, SAM multi-mask picker, SeC + MatAnyone2 pipeline, background removal, face/clothes parsing, ViTMatte alpha matting, luminance keying, inpaint crop/stitch/paste-back suite, image comparison, mask failure diagnostics, temporal anchor interpolation, video propagation, compositing tools |
 | **FolderIncrementer** | 3 | Filesystem-safe auto-versioned output (`v001`, `v002`, …) |
 | **Universal Reroute** | 1 | Nuke-style Dot node — reroute any wire type for cleaner workflow graphs |
 | **Parameter Memory** | 1 | Tracks every parameter change with SQLite history, defaults recall, and per-run diffing |
@@ -112,7 +112,22 @@ The ViTMatte model (~400 MB) auto-downloads from HuggingFace on first use. For o
 
 ### 5. Restart ComfyUI
 
-Look for `[MEC] Loaded 33 MaskEditControl nodes.` in the console to confirm.
+Look for `[MEC] Loaded 35 MaskEditControl nodes.` in the console to confirm.
+
+---
+
+## Detailed Documentation
+
+Every node's parameters, modes, and outputs are documented in depth in the `docs/` folder:
+
+| Guide | Nodes | What's inside |
+|-------|------:|---------------|
+| [Inpaint Suite](docs/inpaint-suite.md) | 4 | Crop Pro, Stitch Pro, Paste Back, Mask Prepare — full pipeline with fill modes, blend modes, interpolation methods |
+| [Mask Editing](docs/mask-editing.md) | 6 | Transform XY, Draw Frame (12 shapes), Composite Advanced (8 ops), Math (11 ops), Batch Manager, Preview Overlay |
+| [SAM & Segmentation](docs/sam-segmentation.md) | 8 | Model Loader, Mask Generator, Multi-Mask Picker, Unified Segmentation, Semantic Segment, Background Remover, both pipelines |
+| [Matting & Refinement](docs/matting-refinement.md) | 4 | Matting Node (7 backends), ViTMatte Refiner (7 methods), Trimap Generator, Luminance Keyer |
+| [Video, Temporal & BBox](docs/video-temporal-bbox.md) | 8 | Frame Extractor, Mask Propagate (5 modes), Temporal Anchor (SDF), 5 BBox nodes |
+| [Utility & Interactive](docs/utility-nodes.md) | 8 | Points Mask Editor, Image Comparer, Mask Failure Explainer, Parameter History, Universal Reroute, 3 Folder Incrementer nodes |
 
 ---
 
@@ -486,8 +501,12 @@ Crop image tightly around the mask region for focused inpainting, with separate 
 | `padding_multiple` | `8` | Pad output to be divisible by N |
 | `video_stable_crop` | `false` | Lock bbox across all frames for video consistency |
 | `fill_masked_area` | `edge_pad` | Fill masked area in crop: `edge_pad` / `neutral_gray` / `original` |
+| `downscale_method` | `lanczos` | Interpolation for downscaling: `lanczos` / `bicubic` / `bilinear` / `nearest-exact` / `area` |
+| `upscale_method` | `lanczos` | Interpolation for upscaling: same options |
 
-**Outputs:** `stitch_data`, `cropped_image`, `inpaint_mask`, `stitch_blend_mask`, `info`
+**Outputs:** `stitch_data`, `cropped_image`, `inpaint_mask`, `stitch_blend_mask`, `crop_mask`, `cropped_composite`, `info`
+
+> `cropped_composite` is a red-tinted debug preview showing the mask overlay on the crop — useful for verifying region coverage.
 
 > **Who is it for?** Inpainting power users who want crop → inpaint → stitch with professional blend modes (Laplacian pyramid, frequency blend, edge-aware).
 
@@ -531,6 +550,40 @@ Standalone mask cleanup and dual-mask preparation for inpainting workflows.
 | `reference_image` | (optional) | For edge-aware stitch blend |
 
 **Outputs:** `inpaint_mask`, `stitch_blend_mask`, `debug_preview`, `info`
+
+---
+
+#### Inpaint Paste Back (MEC)
+
+Simple paste-back node: resize the inpainted crop and composite it onto the original with optional Gaussian-feathered alpha blending.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `stitch_data` | — | From Inpaint Crop Pro |
+| `inpainted_image` | — | Inpainted result from any model |
+| `feather_edges` | `true` | Gaussian-feathered alpha blending at crop boundary |
+| `feather_radius` | `8` | Blur radius for edge feathering (pixels) |
+
+**Outputs:** `image`, `info`
+
+> **Paste Back vs Stitch Pro:** Paste Back is simpler — just resize + paste with optional feathering. Stitch Pro uses the advanced blend mask (Laplacian pyramid, edge-aware, FFT frequency blend) stored in stitch_data for professional compositing.
+
+---
+
+#### Image Comparer (MEC)
+
+Interactive before/after comparison widget with 3 modes: drag-slider split, overlay blend, and difference heatmap.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `image_a` | — | Left / "before" image |
+| `image_b` | — | Right / "after" image |
+| `label_a` | `"Before"` | (optional) Label for image A |
+| `label_b` | `"After"` | (optional) Label for image B |
+
+**Modes:** ◧ Compare (drag slider) · ⊕ Overlay (alpha blend) · ≠ Diff (heatmap)
+
+> **Who is it for?** Quick visual comparison of before/after results — inpainting QA, model comparison, parameter tuning.
 
 ---
 
@@ -755,7 +808,7 @@ Filesystem-aware auto-versioning for output files.
 
 ## Node Quick-Reference Table
 
-All 36 nodes at a glance:
+All 38 nodes at a glance:
 
 | # | Node | Category | VRAM Tier | What it does |
 |---|------|----------|-----------|-------------|
@@ -768,33 +821,35 @@ All 36 nodes at a glance:
 | 7 | Semantic Segment | Segmentation | 2 | SegFormer face/body/clothes parsing |
 | 8 | Background Remover | Matting | 2 | One-click RMBG / BiRefNet removal |
 | 9 | Matting Node | Matting | 2 | Unified 7-backend alpha matting |
-| 10 | ViTMatte Edge Refiner | Matting | 2 | Standalone edge refinement (6 methods) |
+| 10 | ViTMatte Edge Refiner | Matting | 2 | Standalone edge refinement (7 methods) |
 | 11 | Trimap Generator | Matting | 1 | Generate trimap for ViTMatte input |
 | 12 | Luminance Keyer | Keying | 1 | BT.709 luminance keying with smoothstep |
 | 13 | Mask Transform XY | Editing | 1 | Per-axis erode/expand/blur/offset |
-| 14 | Mask Draw Frame | Editing | 1 | Draw shapes on masks |
-| 15 | Mask Composite Advanced | Editing | 1 | Boolean/blend two masks |
-| 16 | Mask Math | Editing | 1 | Mathematical mask operations |
+| 14 | Mask Draw Frame | Editing | 1 | Draw 12 shapes with rotation and SDF |
+| 15 | Mask Composite Advanced | Editing | 1 | Boolean/blend two masks (8 operations) |
+| 16 | Mask Math | Editing | 1 | Mathematical mask operations (11 ops) |
 | 17 | Inpaint Crop Pro | Inpaint | 1 | Crop around mask for inpainting |
 | 18 | Inpaint Stitch Pro | Inpaint | 1 | Composite inpainted result back |
-| 19 | Inpaint Mask Prepare | Inpaint | 1 | Clean + dual-mask preparation |
-| 20 | Mask Batch Manager | Video | 1 | Slice/concat/interleave mask batches |
-| 21 | Mask Propagate Video | Video | 1–2 | Propagate mask across video frames |
-| 22 | Temporal Anchor System | Video | 2 | SDF-based mask interpolation between keyframes |
-| 23 | Video Frame Extractor | Video | 1 | Extract single frame from batch |
-| 24 | BBox Create | BBox | 1 | Manual bbox entry |
-| 25 | BBox From Mask | BBox | 1 | Extract bbox from mask |
-| 26 | BBox To Mask | BBox | 1 | Convert bbox to mask |
-| 27 | BBox Pad | BBox | 1 | Asymmetric bbox padding |
-| 28 | BBox Crop | BBox | 1 | Crop image + mask to bbox |
-| 29 | Mask Failure Explainer | Diagnostics | 1 | Diagnose bad masks, suggest fixes |
-| 30 | Points Mask Editor | Interactive | 1 | Canvas editor for points/bboxes |
-| 31 | Mask Preview Overlay | Preview | 1 | 5-mode mask visualization |
-| 32 | Universal Reroute / Dot | Utility | 1 | Any-type wire reroute |
-| 33 | Parameter History | Utility | 1 | Track parameter changes over runs |
-| 34 | Folder Version Incrementer | Output | 1 | Auto-versioned file output |
-| 35 | Folder Version Check | Output | 1 | Check existing versions |
-| 36 | Folder Version Set | Output | 1 | Reserve version slots |
+| 19 | Inpaint Paste Back | Inpaint | 1 | Simple paste-back with feathered alpha |
+| 20 | Inpaint Mask Prepare | Inpaint | 1 | Clean + dual-mask preparation |
+| 21 | Image Comparer | Preview | 1 | Interactive before/after comparison (3 modes) |
+| 22 | Mask Batch Manager | Video | 1 | Slice/concat/interleave mask batches |
+| 23 | Mask Propagate Video | Video | 1–2 | Propagate mask across video frames |
+| 24 | Temporal Anchor System | Video | 2 | SDF-based mask interpolation between keyframes |
+| 25 | Video Frame Extractor | Video | 1 | Extract single frame from batch |
+| 26 | BBox Create | BBox | 1 | Manual bbox entry |
+| 27 | BBox From Mask | BBox | 1 | Extract bbox from mask |
+| 28 | BBox To Mask | BBox | 1 | Convert bbox to mask |
+| 29 | BBox Pad | BBox | 1 | Asymmetric bbox padding |
+| 30 | BBox Crop | BBox | 1 | Crop image + mask to bbox |
+| 31 | Mask Failure Explainer | Diagnostics | 1 | Diagnose bad masks, suggest fixes |
+| 32 | Points Mask Editor | Interactive | 1 | Canvas editor for points/bboxes |
+| 33 | Mask Preview Overlay | Preview | 1 | 5-mode mask visualization |
+| 34 | Universal Reroute / Dot | Utility | 1 | Any-type wire reroute |
+| 35 | Parameter History | Utility | 1 | Track parameter changes over runs |
+| 36 | Folder Version Incrementer | Output | 1 | Auto-versioned file output |
+| 37 | Folder Version Check | Output | 1 | Check existing versions |
+| 38 | Folder Version Set | Output | 1 | Reserve version slots |
 
 **VRAM Tiers:** 1 = pure tensor math (CPU/GPU, no models), 2 = loads a model (~1–4 GB), 3 = loads multiple models
 
@@ -951,7 +1006,7 @@ python -m pytest tests/test_sam_multi_mask_picker.py -v
 | Torch version mismatch after `pip install -r requirements.txt` | Reinstall your ComfyUI torch: check [PyTorch install page](https://pytorch.org/get-started/locally/) for your CUDA version |
 | SAM model not found | Place `.pth` / `.pt` / `.safetensors` in `ComfyUI/models/sams/` or `ComfyUI/models/sam2/` |
 | CUDA out of memory | Enable `offload_to_cpu` in SAM Model Loader, use `float16` dtype, reduce image resolution |
-| Nodes not showing in menu | Check console for `[MEC] Loaded 33` message. If missing, check for import errors in the console output |
+| Nodes not showing in menu | Check console for `[MEC] Loaded 35` message. If missing, check for import errors in the console output |
 | ViTMatte download fails | Download manually from [HuggingFace](https://huggingface.co/hustvl/vitmatte-small-composition-1k) → place in `ComfyUI/models/vitmatte/` |
 | My mask looks bad | Connect your image + mask to **Mask Failure Explainer** — it will diagnose the issue and suggest the right method |
 
@@ -961,7 +1016,7 @@ python -m pytest tests/test_sam_multi_mask_picker.py -v
 
 ```
 ComfyUI-CustomNodePacks/
-├── __init__.py                     # Node registration (36 nodes)
+├── __init__.py                     # Node registration (38 nodes)
 ├── folder_incrementer.py           # FolderIncrementer nodes (3)
 ├── conftest.py                     # Pytest root configuration
 ├── pyproject.toml                  # Package metadata
@@ -995,7 +1050,7 @@ ComfyUI-CustomNodePacks/
 │   ├── mask_preview.py             # Mask visualization
 │   ├── mask_failure_explainer.py   # Mask diagnostics engine
 │   ├── temporal_anchor.py          # SDF interpolation system
-│   ├── inpaint_suite.py            # Crop/stitch/prepare (3 nodes)
+│   ├── inpaint_suite.py            # Crop/stitch/paste-back/prepare (4 nodes)
 │   ├── bbox_nodes.py               # BBox tools (5 nodes)
 │   ├── points_mask_editor.py       # Interactive editor
 │   ├── video_frame_extractor.py    # Frame extraction
@@ -1003,6 +1058,13 @@ ComfyUI-CustomNodePacks/
 │   ├── parameter_memory.py         # Parameter history + SQLite
 │   ├── model_manager.py            # Shared model cache & download
 │   └── utils.py                    # Shared utilities
+├── docs/
+│   ├── inpaint-suite.md            # Inpaint Crop/Stitch/Paste Back/Prepare
+│   ├── mask-editing.md             # Transform, Draw, Composite, Math, Batch, Preview
+│   ├── sam-segmentation.md         # SAM, Unified Segmentation, Pipelines
+│   ├── matting-refinement.md       # Matting, ViTMatte, Trimap, Keyer
+│   ├── video-temporal-bbox.md      # Video, Temporal Anchor, BBox tools
+│   └── utility-nodes.md            # Editor, Comparer, Diagnostics, Utils
 ├── tests/
 │   ├── test_luminance_keyer.py     # 38 tests
 │   ├── test_inpaint_suite.py       # Inpaint suite tests

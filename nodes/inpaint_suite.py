@@ -628,13 +628,17 @@ def _resize_mask(mask: torch.Tensor, target_h: int, target_w: int,
 def _resize_lanczos(image: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
     """Resize (B,H,W,C) via PIL Lanczos (high quality, slightly slower)."""
     from PIL import Image as PILImage
-    B = image.shape[0]
+    B, H, W, C = image.shape
     out = []
     for i in range(B):
         arr = (image[i].cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
+        if C == 1:
+            arr = arr[:, :, 0]  # PIL needs 2D for grayscale
         pil_img = PILImage.fromarray(arr)
         pil_img = pil_img.resize((target_w, target_h), PILImage.LANCZOS)
         t = torch.from_numpy(np.array(pil_img).astype("float32") / 255.0)
+        if C == 1:
+            t = t.unsqueeze(-1)  # restore channel dim
         out.append(t)
     return torch.stack(out).to(image.device)
 

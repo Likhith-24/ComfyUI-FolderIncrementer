@@ -6,9 +6,10 @@ import { api } from "../../scripts/api.js";
  * Modes: Slider (drag divider), Overlay (drag to blend), Diff (heatmap).
  */
 
-const MODES = ["Slider", "Overlay", "Diff"];
-const BTN_W = 54, BTN_H = 20, BTN_GAP = 3, BTN_PAD = 6;
+const MODES = ["◧ Compare", "⊕ Overlay", "≠ Diff"];
+const BTN_W = 62, BTN_H = 22, BTN_GAP = 3, BTN_PAD = 6;
 const HANDLE_R = 14;
+const LABEL_FADE_MS = 200;
 
 app.registerExtension({
     name: "MEC.ImageComparer",
@@ -43,6 +44,8 @@ app.registerExtension({
                 drag: false,
                 labelA: "Before",
                 labelB: "After",
+                labelOpacity: 1.0,
+                _fadeTimer: null,
             };
             node._S = S;
 
@@ -80,6 +83,8 @@ app.registerExtension({
                 // Start drag
                 cvs.setPointerCapture(e.pointerId);
                 S.drag = true;
+                S.labelOpacity = 0.15;
+                if (S._fadeTimer) clearTimeout(S._fadeTimer);
                 const nx = cx / cvs.width;
                 if (S.mode === 0)
                     S.divPos = Math.max(0.01, Math.min(0.99, nx));
@@ -101,6 +106,11 @@ app.registerExtension({
 
             const up = () => {
                 S.drag = false;
+                if (S._fadeTimer) clearTimeout(S._fadeTimer);
+                S._fadeTimer = setTimeout(() => {
+                    S.labelOpacity = 1.0;
+                    node._render();
+                }, LABEL_FADE_MS);
             };
             cvs.addEventListener("pointerup", up);
             cvs.addEventListener("pointercancel", up);
@@ -253,7 +263,7 @@ app.registerExtension({
                 ctx.stroke();
                 ctx.shadowBlur = 0;
 
-                // Handle circle
+                // Handle circle with grip dots
                 const hy = ch / 2;
                 ctx.beginPath();
                 ctx.arc(dx, hy, HANDLE_R, 0, Math.PI * 2);
@@ -262,11 +272,16 @@ app.registerExtension({
                 ctx.strokeStyle = "#666";
                 ctx.lineWidth = 1.5;
                 ctx.stroke();
-                ctx.fillStyle = "#444";
-                ctx.font = "bold 14px sans-serif";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                ctx.fillText("\u25C0\u25B6", dx, hy);
+                // Grip dots (⋮ pattern)
+                ctx.fillStyle = "#555";
+                for (let dy = -6; dy <= 6; dy += 6) {
+                    ctx.beginPath();
+                    ctx.arc(dx - 3, hy + dy, 1.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.beginPath();
+                    ctx.arc(dx + 3, hy + dy, 1.5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
                 ctx.restore();
             } else if (S.mode === 1) {
                 /* ── Overlay ── */
@@ -276,13 +291,26 @@ app.registerExtension({
                 ctx.drawImage(S.imgB, 0, 0, cw, ch);
                 ctx.globalAlpha = 1;
 
-                // Progress bar
-                const bh = 4,
-                    by = ch - bh - 6;
-                ctx.fillStyle = "rgba(0,0,0,0.45)";
-                ctx.fillRect(12, by, cw - 24, bh);
+                // Scrubber bar (20px height, bottom)
+                const bh = 6, by = ch - 20;
+                const barX = 16, barW = cw - 32;
+                ctx.fillStyle = "rgba(0,0,0,0.5)";
+                ctx.beginPath();
+                ctx.roundRect(barX, by, barW, bh, 3);
+                ctx.fill();
                 ctx.fillStyle = "#5bf";
-                ctx.fillRect(12, by, (cw - 24) * S.alpha, bh);
+                ctx.beginPath();
+                ctx.roundRect(barX, by, barW * S.alpha, bh, 3);
+                ctx.fill();
+                // Scrubber handle
+                const hx = barX + barW * S.alpha;
+                ctx.beginPath();
+                ctx.arc(hx, by + bh / 2, 7, 0, Math.PI * 2);
+                ctx.fillStyle = "#fff";
+                ctx.fill();
+                ctx.strokeStyle = "#5bf";
+                ctx.lineWidth = 2;
+                ctx.stroke();
             } else {
                 /* ── Diff ── */
                 if (!S.diffCvs) this._buildDiff();
@@ -315,6 +343,7 @@ function _pill(ctx, x, y, text) {
 
 function _drawLabels(ctx, S, cw, ch) {
     ctx.save();
+    ctx.globalAlpha = S.labelOpacity;
     ctx.font = "bold 11px sans-serif";
     if (S.mode === 0) {
         _pill(ctx, 5, ch - 24, S.labelA);

@@ -2,6 +2,32 @@
 
 All notable changes to ComfyUI-CustomNodePacks are documented here.
 
+## [1.3.1] – 2025-07-15
+
+### Added
+
+- **InpaintPasteBackMEC** – new lightweight node to paste inpainted crop back
+  onto the original image using stitch_data, with optional Gaussian-feathered
+  alpha blending at the crop boundary.
+- **InpaintCropProMEC** – `downscale_method` and `upscale_method` inputs
+  with 5 interpolation modes: lanczos (PIL-based, highest quality), bicubic,
+  bilinear, nearest-exact, area. Upscale method is stored in stitch_data and
+  automatically used by InpaintStitchProMEC.
+
+### Changed
+
+- **InpaintCropProMEC** – `padding_multiple` now enforces step=2, min=2 to
+  guarantee even-valued padding (required by many tiled/diffusion models).
+- **Image Comparer (JS)** – mode labels now use Unicode icons
+  (◧ Compare, ⊕ Overlay, ≠ Diff); labels fade during drag; divider grip
+  uses a dot-grid pattern; overlay scrubber upgraded to rounded bar + circular
+  handle.
+
+### Fixed
+
+- **InpaintStitchProMEC** – now reads `upscale_method` from stitch_data
+  (defaulting to lanczos) instead of always using bilinear.
+
 ## [1.3.0] – 2025-07-14
 
 ### Added

@@ -27,9 +27,10 @@ from typing import Dict, List, Tuple, Optional, Any
 import torch
 import torch.nn.functional as F
 
+import numpy as np
+
 try:
     import cv2
-    import numpy as np
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
@@ -578,22 +579,64 @@ def _apply_size_mode(crop_w: int, crop_h: int, size_mode: str,
 #  Resize helpers (IMAGE and MASK)
 # ══════════════════════════════════════════════════════════════════════
 
-def _resize_image(image: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
-    """Resize (B, H, W, C) image to (B, target_h, target_w, C) using bilinear."""
+# Supported interpolation modes for F.interpolate
+# "lanczos" is implemented via PIL fallback; others map to torch modes.
+_TORCH_INTERP_MODES = {
+    "bilinear": "bilinear",
+    "bicubic": "bicubic",
+    "nearest-exact": "nearest-exact",
+    "area": "area",
+}
+
+
+def _resize_image(image: torch.Tensor, target_h: int, target_w: int,
+                  mode: str = "bilinear") -> torch.Tensor:
+    """Resize (B, H, W, C) image to (B, target_h, target_w, C)."""
     if image.shape[1] == target_h and image.shape[2] == target_w:
         return image
+    if mode == "lanczos":
+        return _resize_lanczos(image, target_h, target_w)
+    torch_mode = _TORCH_INTERP_MODES.get(mode, "bilinear")
     img_bchw = image.permute(0, 3, 1, 2)
-    resized = F.interpolate(img_bchw, size=(target_h, target_w), mode="bilinear", align_corners=False)
+    align = False if torch_mode in ("bilinear", "bicubic") else None
+    kwargs = {"size": (target_h, target_w), "mode": torch_mode}
+    if align is not None:
+        kwargs["align_corners"] = align
+    resized = F.interpolate(img_bchw, **kwargs)
     return resized.permute(0, 2, 3, 1)
 
 
-def _resize_mask(mask: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
-    """Resize (B, H, W) mask to (B, target_h, target_w) using bilinear."""
+def _resize_mask(mask: torch.Tensor, target_h: int, target_w: int,
+                 mode: str = "bilinear") -> torch.Tensor:
+    """Resize (B, H, W) mask to (B, target_h, target_w)."""
     if mask.shape[1] == target_h and mask.shape[2] == target_w:
         return mask
+    if mode == "lanczos":
+        # For masks, convert to 4D, use PIL lanczos, squeeze back
+        m4 = mask.unsqueeze(-1).expand(-1, -1, -1, 1)  # (B,H,W,1)
+        resized = _resize_lanczos(m4, target_h, target_w)
+        return resized[..., 0]
+    torch_mode = _TORCH_INTERP_MODES.get(mode, "bilinear")
     m4 = mask.unsqueeze(1)
-    resized = F.interpolate(m4, size=(target_h, target_w), mode="bilinear", align_corners=False)
+    kwargs = {"size": (target_h, target_w), "mode": torch_mode}
+    if torch_mode in ("bilinear", "bicubic"):
+        kwargs["align_corners"] = False
+    resized = F.interpolate(m4, **kwargs)
     return resized.squeeze(1)
+
+
+def _resize_lanczos(image: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+    """Resize (B,H,W,C) via PIL Lanczos (high quality, slightly slower)."""
+    from PIL import Image as PILImage
+    B = image.shape[0]
+    out = []
+    for i in range(B):
+        arr = (image[i].cpu().numpy() * 255.0).clip(0, 255).astype("uint8")
+        pil_img = PILImage.fromarray(arr)
+        pil_img = pil_img.resize((target_w, target_h), PILImage.LANCZOS)
+        t = torch.from_numpy(np.array(pil_img).astype("float32") / 255.0)
+        out.append(t)
+    return torch.stack(out).to(image.device)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -618,6 +661,7 @@ class InpaintCropProMEC:
     INPAINT_MASK_MODES = ["hard_binary", "slight_feather", "soft_blend"]
     SIZE_MODES = ["free_size", "forced_size", "ranged_size"]
     FILL_MODES = ["edge_pad", "neutral_gray", "original"]
+    INTERP_METHODS = ["lanczos", "bicubic", "bilinear", "nearest-exact", "area"]
     ASPECT_RATIOS = [
         "none",
         "1:1", "4:3", "3:4", "16:9", "9:16",
@@ -659,8 +703,8 @@ class InpaintCropProMEC:
                     "default": 2048, "min": 64, "max": 8192, "step": 8,
                     "tooltip": "Maximum dimension for ranged_size mode"}),
                 "padding_multiple": ("INT", {
-                    "default": 8, "min": 1, "max": 128, "step": 1,
-                    "tooltip": "Pad output dimensions to be divisible by this value (default: 8)"}),
+                    "default": 8, "min": 2, "max": 128, "step": 2,
+                    "tooltip": "Pad output dimensions to be divisible by this value (must be even, default: 8)"}),
                 "video_stable_crop": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Lock bbox across all frames using union of all mask regions (for video)"}),
@@ -670,6 +714,12 @@ class InpaintCropProMEC:
                 "downscale_factor": ("FLOAT", {
                     "default": 1.0, "min": 0.25, "max": 1.0, "step": 0.05,
                     "tooltip": "Downscale crop before inpainting (e.g. 0.5 = half resolution). Stitched back at original res."}),
+                "downscale_method": (cls.INTERP_METHODS, {
+                    "default": "lanczos",
+                    "tooltip": "Interpolation method for downscaling: lanczos (best quality), bicubic, bilinear, nearest-exact, area"}),
+                "upscale_method": (cls.INTERP_METHODS, {
+                    "default": "lanczos",
+                    "tooltip": "Interpolation method for upscaling during stitch-back: lanczos, bicubic, bilinear, nearest-exact, area"}),
                 "mask_blur": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 64.0, "step": 0.5,
                     "tooltip": "Blur the mask edges before cropping (sigma in pixels)"}),
@@ -688,8 +738,8 @@ class InpaintCropProMEC:
             },
         }
 
-    RETURN_TYPES = ("STITCH_DATA", "IMAGE", "MASK", "MASK", "MASK", "STRING")
-    RETURN_NAMES = ("stitch_data", "cropped_image", "inpaint_mask", "stitch_blend_mask", "crop_mask", "info")
+    RETURN_TYPES = ("STITCH_DATA", "IMAGE", "IMAGE", "MASK", "MASK", "MASK", "STRING")
+    RETURN_NAMES = ("stitch_data", "cropped_image", "cropped_composite", "inpaint_mask", "stitch_blend_mask", "crop_mask", "info")
     FUNCTION = "crop_for_inpaint"
     CATEGORY = "MaskEditControl/Inpaint"
     DESCRIPTION = "Crop image around mask with separate inpaint and stitch blend masks. Supports edge-aware, Laplacian, frequency blend, downscale, mask processing, and aspect ratio presets."
@@ -739,6 +789,8 @@ class InpaintCropProMEC:
                          min_size: int, max_size: int, padding_multiple: int,
                          video_stable_crop: bool, fill_masked_area: str,
                          downscale_factor: float = 1.0,
+                         downscale_method: str = "lanczos",
+                         upscale_method: str = "lanczos",
                          mask_blur: float = 0.0, mask_grow: int = 0,
                          aspect_ratio: str = "none",
                          custom_aspect_w: int = 1, custom_aspect_h: int = 1):
@@ -840,9 +892,10 @@ class InpaintCropProMEC:
             cropped = cropped * (1.0 - binary_3d) + blurred_fill * binary_3d
 
         # Step 6: Resize crop to target dimensions
+        resize_mode = downscale_method if downscale_factor < 1.0 else "bilinear"
         if crop_w != target_w or crop_h != target_h:
-            cropped = _resize_image(cropped, target_h, target_w)
-            cropped_mask = _resize_mask(cropped_mask, target_h, target_w)
+            cropped = _resize_image(cropped, target_h, target_w, mode=resize_mode)
+            cropped_mask = _resize_mask(cropped_mask, target_h, target_w, mode=resize_mode)
 
         # Step 7: Generate inpaint mask
         inpaint_mask = _apply_inpaint_mask_mode(cropped_mask, inpaint_mask_mode)
@@ -852,7 +905,13 @@ class InpaintCropProMEC:
             cropped, cropped_mask, stitch_blend_mode, blend_radius
         )
 
-        # Step 8.5: Generate crop_mask (binary mask showing cropped region in original image space)
+        # Step 8.5: Generate cropped_composite (mask overlaid on cropped image as red tint)
+        mask_rgb = inpaint_mask.unsqueeze(-1) * torch.tensor(
+            [0.8, 0.15, 0.15], device=device, dtype=cropped.dtype
+        ).view(1, 1, 1, 3)
+        cropped_composite = (cropped * (1.0 - inpaint_mask.unsqueeze(-1) * 0.5) + mask_rgb * 0.5).clamp(0, 1)
+
+        # Step 8.6: Generate crop_mask (binary mask showing cropped region in original image space)
         crop_mask = torch.zeros(B, H, W, device=device, dtype=torch.float32)
         crop_mask[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w] = 1.0
 
@@ -870,6 +929,7 @@ class InpaintCropProMEC:
             "stitch_blend_mask_crop": stitch_blend_mask,
             "original_mask": mask,
             "downscale_factor": downscale_factor,
+            "upscale_method": upscale_method,
         }
 
         # Step 10: Build info string
@@ -892,7 +952,7 @@ class InpaintCropProMEC:
         ]
         info = "\n".join(info_lines)
 
-        return (stitch_data, cropped, inpaint_mask, stitch_blend_mask, crop_mask, info)
+        return (stitch_data, cropped, cropped_composite, inpaint_mask, stitch_blend_mask, crop_mask, info)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -942,6 +1002,7 @@ class InpaintStitchProMEC:
         blend_radius = stitch_data["blend_radius"]
         stitch_blend_mask_crop = stitch_data["stitch_blend_mask_crop"]
         original_mask = stitch_data["original_mask"]
+        upscale_method = stitch_data.get("upscale_method", "lanczos")
 
         device = _get_device(original_image)
         B, H, W, C = original_image.shape
@@ -950,10 +1011,10 @@ class InpaintStitchProMEC:
         blend_mode = stored_blend_mode if blend_mode_override == "from_crop" else blend_mode_override
 
         # Resize inpainted image to crop dimensions
-        inp_resized = _resize_image(inpainted_image, crop_h, crop_w)
+        inp_resized = _resize_image(inpainted_image, crop_h, crop_w, mode=upscale_method)
 
         # Resize blend mask to crop dimensions
-        blend_mask_crop = _resize_mask(stitch_blend_mask_crop, crop_h, crop_w)
+        blend_mask_crop = _resize_mask(stitch_blend_mask_crop, crop_h, crop_w, mode=upscale_method)
 
         # Regenerate blend mask if override differs from stored
         if blend_mode_override != "from_crop" and blend_mode_override != stored_blend_mode:
@@ -1164,3 +1225,84 @@ class InpaintMaskPrepareMEC:
         info = "\n".join(info_lines)
 
         return (inpaint_mask, stitch_blend_mask, debug_preview, info)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  NODE 4: InpaintPasteBackMEC
+# ══════════════════════════════════════════════════════════════════════
+
+class InpaintPasteBackMEC:
+    """Paste inpainted crop back onto original using stitch_data.
+
+    Simplified companion to InpaintStitchProMEC — no blend mode logic,
+    just a clean resize + paste with optional feathered alpha composite.
+    Accepts stitch_data from InpaintCropProMEC or a manual CROP_INFO dict.
+    """
+
+    VRAM_TIER = 1
+    INTERP_METHODS = ["lanczos", "bicubic", "bilinear", "nearest-exact", "area"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "stitch_data": ("STITCH_DATA", {"tooltip": "Stitch data from InpaintCropProMEC"}),
+                "inpainted_image": ("IMAGE", {"tooltip": "Inpainted crop result (B,H,W,C)"}),
+                "upscale_method": (cls.INTERP_METHODS, {
+                    "default": "lanczos",
+                    "tooltip": "Interpolation method for resizing crop back to original dimensions"}),
+                "feather_edges": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Apply Gaussian feather at crop boundary for seamless paste"}),
+                "feather_radius": ("INT", {
+                    "default": 16, "min": 0, "max": 64, "step": 1,
+                    "tooltip": "Feather radius in pixels (only used if feather_edges is True)"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "info")
+    FUNCTION = "paste_back"
+    CATEGORY = "MaskEditControl/Inpaint"
+    DESCRIPTION = "Paste inpainted crop back onto original image using stitch_data with optional feathered edges."
+
+    def paste_back(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
+                   upscale_method: str, feather_edges: bool, feather_radius: int):
+        original_image = stitch_data["original_image"]
+        crop_x = stitch_data["crop_x"]
+        crop_y = stitch_data["crop_y"]
+        crop_w = stitch_data["crop_w"]
+        crop_h = stitch_data["crop_h"]
+
+        device = _get_device(original_image)
+        B, H, W, C = original_image.shape
+
+        # Resize inpainted crop to match crop region dimensions
+        inp_resized = _resize_image(inpainted_image, crop_h, crop_w, mode=upscale_method)
+
+        canvas = original_image.clone()
+
+        if feather_edges and feather_radius > 0:
+            # Create a mask that is 1.0 inside and feathered at edges
+            paste_mask = torch.ones(1, 1, crop_h, crop_w, device=device, dtype=torch.float32)
+            paste_mask = _gaussian_blur_2d(paste_mask, sigma=feather_radius)
+            paste_mask = paste_mask.squeeze(0).squeeze(0)  # (crop_h, crop_w)
+            paste_mask_3d = paste_mask.unsqueeze(-1)  # (crop_h, crop_w, 1)
+            for b in range(B):
+                orig_crop = canvas[b, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :]
+                canvas[b, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :] = (
+                    orig_crop * (1.0 - paste_mask_3d) + inp_resized[b] * paste_mask_3d
+                )
+        else:
+            canvas[:, crop_y:crop_y + crop_h, crop_x:crop_x + crop_w, :] = inp_resized
+
+        info = (
+            f"InpaintPasteBackMEC:\n"
+            f"  paste region: x={crop_x}, y={crop_y}, w={crop_w}, h={crop_h}\n"
+            f"  upscale_method: {upscale_method}\n"
+            f"  feather_edges: {feather_edges}, radius={feather_radius}\n"
+            f"  inpainted input: {inpainted_image.shape}\n"
+            f"  output: {B}x{H}x{W}x{C}"
+        )
+
+        return (canvas.clamp(0, 1), info)

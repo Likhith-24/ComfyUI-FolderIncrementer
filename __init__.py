@@ -48,7 +48,7 @@ from .nodes.luminance_keyer import LuminanceKeyerMEC
 from .nodes.mask_failure_explainer import MaskFailureExplainerMEC
 from .nodes.temporal_anchor import TemporalAnchorMEC
 from .nodes.sam_multi_mask_picker import SamMultiMaskPickerMEC
-from .nodes.inpaint_suite import InpaintCropProMEC, InpaintStitchProMEC, InpaintMaskPrepareMEC
+from .nodes.inpaint_suite import InpaintCropProMEC, InpaintStitchProMEC, InpaintMaskPrepareMEC, InpaintPasteBackMEC
 from .nodes.image_comparer import ImageComparerMEC
 
 _MEC_MAPPINGS = {
@@ -85,6 +85,7 @@ _MEC_MAPPINGS = {
     "InpaintCropProMEC": InpaintCropProMEC,
     "InpaintStitchProMEC": InpaintStitchProMEC,
     "InpaintMaskPrepareMEC": InpaintMaskPrepareMEC,
+    "InpaintPasteBackMEC": InpaintPasteBackMEC,
     "ImageComparerMEC": ImageComparerMEC,
 }
 
@@ -122,6 +123,7 @@ _MEC_DISPLAY = {
     "InpaintCropProMEC": "Inpaint Crop Pro (MEC)",
     "InpaintStitchProMEC": "Inpaint Stitch Pro (MEC)",
     "InpaintMaskPrepareMEC": "Inpaint Mask Prepare (MEC)",
+    "InpaintPasteBackMEC": "Inpaint Paste Back (MEC)",
     "ImageComparerMEC": "Image Comparer (MEC)",
 }
 

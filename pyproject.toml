@@ -1,16 +1,12 @@
 [project]
 name = "comfyui-customnodepacks"
 description = "Custom node packs for ComfyUI: FolderIncrementer (auto-versioning) + MaskEditControl (pinpoint mask editing with SAM2/SAM3, per-axis erode/expand, point editor, bbox tools, video mask propagation)."
-version = "1.5.2"
+version = "1.2.5"
 license = { file = "MIT-License" }
 requires-python = ">=3.10"
 
 [project.urls]
 Repository = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
 
 [tool.comfy]
 PublisherId = "likhith-24" # TODO (fill in Publisher ID from Comfy Registry Website).

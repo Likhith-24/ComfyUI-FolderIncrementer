@@ -41,6 +41,13 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
+from .stabilization_utils import (
+    compensate_camera_motion,
+    compute_motion_magnitudes,
+    motion_adaptive_temporal_smooth,
+    compute_stable_bbox_trajectory,
+)
+
 logger = logging.getLogger("MEC")
 
 
@@ -314,62 +321,64 @@ def _compute_bbox_single(mask_2d: torch.Tensor) -> Tuple[int, int, int, int]:
 
 
 def _compute_stable_bbox(mask: torch.Tensor) -> Tuple[int, int, int, int]:
-    """Compute the union bounding box across all frames.
+    """Compute a smooth-trajectory bounding box across all frames.
 
     mask: (B, H, W) float32
-    Returns: (x, y, w, h) — single bbox covering all frames' mask regions.
+    Returns: (x, y, w, h) — single bbox covering the smoothed per-frame trajectory.
+
+    Uses median + exponential smoothing for outlier rejection and jitter reduction,
+    instead of naive union which produces an overly loose crop.
     """
     B, H, W = mask.shape
-    union_x_min, union_y_min = W, H
-    union_x_max, union_y_max = 0, 0
-    any_valid = False
 
-    for b in range(B):
-        x, y, w, h = _compute_bbox_single(mask[b])
-        if x < 0:
-            continue
-        any_valid = True
-        union_x_min = min(union_x_min, x)
-        union_y_min = min(union_y_min, y)
-        union_x_max = max(union_x_max, x + w)
-        union_y_max = max(union_y_max, y + h)
+    if B <= 2:
+        # For very short sequences, union is fine
+        union_x_min, union_y_min = W, H
+        union_x_max, union_y_max = 0, 0
+        any_valid = False
 
-    if not any_valid:
-        return (0, 0, W, H)
+        for b in range(B):
+            x, y, w, h = _compute_bbox_single(mask[b])
+            if x < 0:
+                continue
+            any_valid = True
+            union_x_min = min(union_x_min, x)
+            union_y_min = min(union_y_min, y)
+            union_x_max = max(union_x_max, x + w)
+            union_y_max = max(union_y_max, y + h)
 
-    return (union_x_min, union_y_min,
-            union_x_max - union_x_min, union_y_max - union_y_min)
+        if not any_valid:
+            return (0, 0, W, H)
+
+        return (union_x_min, union_y_min,
+                union_x_max - union_x_min, union_y_max - union_y_min)
+
+    # For longer sequences: use trajectory smoothing
+    return compute_stable_bbox_trajectory(
+        mask, smooth_method="median_then_exponential",
+        window_radius=3, alpha=0.3,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  Temporal Gaussian smoothing along batch dimension
 # ══════════════════════════════════════════════════════════════════════
 
-def _temporal_gaussian_smooth(mask: torch.Tensor, sigma: float) -> torch.Tensor:
+def _temporal_gaussian_smooth(mask: torch.Tensor, sigma: float,
+                              motion_mags: Optional[List[float]] = None) -> torch.Tensor:
     """Smooth a (B, H, W) mask along the batch (temporal) dimension.
 
-    Applies 1D Gaussian convolution along dim=0 independently per spatial pixel.
-    Returns (B, H, W).
+    Uses motion-adaptive smoothing when motion_mags is provided:
+    high-motion frames get less smoothing (preserve detail), low-motion
+    frames get more smoothing (reduce noise).
+
+    Falls back to uniform Gaussian when motion_mags is None.
     """
-    B, H, W = mask.shape
-    if B <= 1 or sigma <= 0:
-        return mask
-    device = _get_device(mask)
-    k1d = _gauss_kernel_1d(sigma, device, mask.dtype)  # (K,)
-    K = len(k1d)
-    pad = K // 2
-
-    # Reshape: (B, H*W) → (H*W, 1, B) for conv1d
-    flat = mask.reshape(B, H * W).permute(1, 0)  # (H*W, B)
-    flat = flat.unsqueeze(1)  # (H*W, 1, B)
-
-    kernel = k1d.view(1, 1, -1)  # (1, 1, K)
-    padded = F.pad(flat, (pad, pad), mode="replicate")
-    smoothed = F.conv1d(padded, kernel)  # (H*W, 1, B)
-
-    # Reshape back: (H*W, 1, B) → (B, H, W)
-    smoothed = smoothed.squeeze(1).permute(1, 0).reshape(B, H, W)
-    return smoothed.clamp(0.0, 1.0)
+    return motion_adaptive_temporal_smooth(
+        mask, sigma_base=sigma,
+        motion_magnitudes=motion_mags,
+        motion_sensitivity=0.5,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════

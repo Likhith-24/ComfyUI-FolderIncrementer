@@ -71,51 +71,89 @@ app.registerExtension({
             return results;
         }
 
-        // ── Deep graph traversal to find a filename ──────────────────
-        function findFilenameDeep(startNode, maxDepth = 12) {
-            const visited = new Set();
-            const queue = [{ node: startNode, depth: 0 }];
+        // ── Node types that are transparent routing (follow through) ──
+        const ROUTING_RE = /reroute|universalreroute/i;
+        function isRoutingNode(n) {
+            const cls = n.comfyClass || "";
+            return ROUTING_RE.test(cls);
+        }
 
-            while (queue.length > 0) {
-                const { node: current, depth } = queue.shift();
-                if (!current || depth > maxDepth) continue;
-                if (visited.has(current.id)) continue;
+        function isGetBusNode(n) {
+            const cls = (n.comfyClass || "").toLowerCase();
+            const title = (n.title || "").toLowerCase();
+            return title.startsWith("get") || cls.startsWith("get")
+                || cls.includes("getnode");
+        }
+
+        // Follow first connected input of a node (upstream one hop)
+        function followFirstInput(n) {
+            if (!n?.inputs) return null;
+            for (const inp of n.inputs) {
+                if (inp.link == null) continue;
+                const link = app.graph.links[inp.link];
+                if (!link) continue;
+                return app.graph.getNodeById(link.origin_id) || null;
+            }
+            return null;
+        }
+
+        // ── Input loader types that should NOT supply filenames ─────
+        //    When a loader (LoadImage, LoadVideo, etc.) is directly
+        //    connected to trigger, its filename is a reference/source
+        //    file — not an output name.  Block these to avoid the
+        //    FolderIncrementer using input filenames as output names.
+        const INPUT_LOADER_TYPES = [
+            "LoadImage", "Load Image", "LoadImageMask",
+            "LoadVideo", "Load Video", "VHS_LoadVideo",
+            "LoadAudio", "Load Audio", "VHS_LoadAudio",
+            "LoadImageBatch", "LoadImagesFromDir",
+        ];
+
+        function isInputLoader(n) {
+            const cls = n.comfyClass || "";
+            const title = n.title || "";
+            return INPUT_LOADER_TYPES.some(t => cls.includes(t) || title.includes(t));
+        }
+
+        // ── Shallow chain traversal to find a filename ───────────────
+        //    Follows the direct chain (reroute / Get→Set bus) to reach
+        //    the first "real" node.  Stops there — does NOT fan out
+        //    across all inputs of processing nodes like VAE Decode,
+        //    which previously caused wrong filenames in WAN workflows.
+        //    Input loaders are blocked: their filenames are source files,
+        //    not output names.
+        function findFilenameFromChain(startNode, maxDepth = 8) {
+            let current = startNode;
+            const visited = new Set();
+
+            for (let depth = 0; depth <= maxDepth; depth++) {
+                if (!current || visited.has(current.id)) return null;
                 visited.add(current.id);
 
-                const fname = getFilenameFromNode(current);
-                if (fname) return fname;
-
-                // If this looks like a Get bus node → resolve to Set nodes
-                const title = (current.title || "").toLowerCase();
-                const cls = (current.comfyClass || "").toLowerCase();
-                const isGet = title.startsWith("get") || cls.startsWith("get")
-                           || cls.includes("getnode");
-                if (isGet) {
+                // Get bus → resolve to matching Set node, then follow its input
+                if (isGetBusNode(current)) {
                     const setNodes = resolveGetNode(current);
-                    for (const sn of setNodes) {
-                        queue.push({ node: sn, depth: depth + 1 });
-                        if (sn.inputs) {
-                            for (const inp of sn.inputs) {
-                                if (inp.link == null) continue;
-                                const link = app.graph.links[inp.link];
-                                if (!link) continue;
-                                const upNode = app.graph.getNodeById(link.origin_id);
-                                if (upNode) queue.push({ node: upNode, depth: depth + 1 });
-                            }
-                        }
+                    if (setNodes.length > 0) {
+                        const upstream = followFirstInput(setNodes[0]);
+                        current = upstream || setNodes[0];
+                        continue;
                     }
+                    return null;
                 }
 
-                // Follow all input links upstream
-                if (current.inputs) {
-                    for (const inp of current.inputs) {
-                        if (inp.link == null) continue;
-                        const link = app.graph.links[inp.link];
-                        if (!link) continue;
-                        const upNode = app.graph.getNodeById(link.origin_id);
-                        if (upNode) queue.push({ node: upNode, depth: depth + 1 });
-                    }
+                // Routing/reroute → follow through transparently
+                if (isRoutingNode(current)) {
+                    current = followFirstInput(current);
+                    continue;
                 }
+
+                // Input loader directly connected → block its filename
+                if (isInputLoader(current)) {
+                    return null;
+                }
+
+                // Real node — check for filename widget and stop
+                return getFilenameFromNode(current);
             }
             return null;
         }
@@ -129,7 +167,7 @@ app.registerExtension({
                 if (!linkInfo) continue;
                 const srcNode = app.graph.getNodeById(linkInfo.origin_id);
                 if (!srcNode) continue;
-                const result = findFilenameDeep(srcNode);
+                const result = findFilenameFromChain(srcNode);
                 if (result) return result;
             }
             return null;

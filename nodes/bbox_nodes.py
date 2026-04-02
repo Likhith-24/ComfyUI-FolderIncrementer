@@ -203,7 +203,10 @@ class BBoxCrop:
 
 
 class BBoxSmooth:
-    """Smooth a sequence of bounding boxes across video frames to reduce jitter."""
+    """Smooth a sequence of bounding boxes across video frames to reduce jitter.
+
+    Supports moving average, exponential, and median-based outlier rejection.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -215,9 +218,17 @@ class BBoxSmooth:
                 "smoothing_radius": ("INT", {
                     "default": 3, "min": 1, "max": 30, "step": 1,
                     "tooltip": "Temporal window radius for smoothing (higher = smoother but more lag)"}),
-                "method": (["moving_average", "exponential"], {
-                    "default": "moving_average",
-                    "tooltip": "Smoothing method: moving_average (uniform window) or exponential (recent frames weighted more)"}),
+                "method": (["median_then_exponential", "moving_average", "exponential", "median"], {
+                    "default": "median_then_exponential",
+                    "tooltip": (
+                        "median_then_exponential: median filter for outlier rejection, then exponential smooth (recommended). "
+                        "moving_average: uniform window average. "
+                        "exponential: recent frames weighted more. "
+                        "median: pure median filter (removes jumps)."
+                    )}),
+                "alpha": ("FLOAT", {
+                    "default": 0.3, "min": 0.05, "max": 1.0, "step": 0.05,
+                    "tooltip": "Exponential smoothing factor (lower = smoother). Only used by exponential and median_then_exponential methods."}),
             },
         }
 
@@ -225,9 +236,10 @@ class BBoxSmooth:
     RETURN_NAMES = ("smoothed_bboxes_json", "first_bbox",)
     FUNCTION = "smooth"
     CATEGORY = "MaskEditControl/BBox"
-    DESCRIPTION = "Smooth bounding boxes across video frames to eliminate jitter. Feed output back via SetNode for stable crops."
+    DESCRIPTION = "Smooth bounding boxes across video frames to eliminate jitter. Median-based outlier rejection + exponential smoothing for best results."
 
-    def smooth(self, bboxes_json, smoothing_radius, method):
+    def smooth(self, bboxes_json, smoothing_radius, method, alpha):
+        import numpy as np
         try:
             bboxes = json.loads(bboxes_json)
         except (json.JSONDecodeError, TypeError):
@@ -242,22 +254,35 @@ class BBoxSmooth:
         if n <= 1:
             return (json.dumps(bboxes), bboxes[0] if bboxes else [0, 0, 128, 128])
 
-        smoothed = []
-        for i in range(n):
-            if method == "moving_average":
+        arr = np.array(bboxes, dtype=np.float64)  # (N, 4)
+
+        # Step 1: Median filter for outlier rejection
+        if method in ("median", "median_then_exponential"):
+            filtered = np.copy(arr)
+            for i in range(n):
                 start = max(0, i - smoothing_radius)
                 end = min(n, i + smoothing_radius + 1)
-                window = bboxes[start:end]
-                avg = [sum(b[c] for b in window) / len(window) for c in range(4)]
-                smoothed.append([int(round(v)) for v in avg])
-            else:
-                # Exponential smoothing
-                alpha = 2.0 / (smoothing_radius + 1)
-                if i == 0:
-                    smoothed.append(list(bboxes[0]))
-                else:
-                    prev = smoothed[-1]
-                    cur = bboxes[i]
-                    smoothed.append([int(round(alpha * cur[c] + (1 - alpha) * prev[c])) for c in range(4)])
+                window = arr[start:end]
+                filtered[i] = np.median(window, axis=0)
+            arr = filtered
 
-        return (json.dumps(smoothed), smoothed[0])
+        # Step 2: Smoothing
+        if method == "moving_average":
+            smoothed = np.copy(arr)
+            for i in range(n):
+                start = max(0, i - smoothing_radius)
+                end = min(n, i + smoothing_radius + 1)
+                window = arr[start:end]
+                smoothed[i] = np.mean(window, axis=0)
+            arr = smoothed
+        elif method in ("exponential", "median_then_exponential"):
+            smoothed = np.copy(arr)
+            for i in range(1, n):
+                smoothed[i] = alpha * arr[i] + (1.0 - alpha) * smoothed[i - 1]
+            arr = smoothed
+
+        result = [[int(round(row[0])), int(round(row[1])),
+                    int(round(row[2])), int(round(row[3]))]
+                   for row in arr]
+
+        return (json.dumps(result), result[0])

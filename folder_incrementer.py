@@ -1,6 +1,8 @@
 import os
 import re
+import sys
 from datetime import datetime
+from pathlib import Path
 
 
 # Date format selector → strftime mapping
@@ -11,6 +13,22 @@ DATE_FORMAT_MAP = {
 }
 DATE_FORMAT_CHOICES = list(DATE_FORMAT_MAP.keys())
 
+# Path separator styles — different OSes expect different separators
+# when paths are passed to external tools or displayed to users.
+# ComfyUI internally handles "/" on all OSes, but users may need
+# native separators for downstream scripts or other tools.
+PATH_STYLE_CHOICES = ["auto", "windows", "linux", "macos"]
+
+
+def _get_path_sep(style: str) -> str:
+    """Return the path separator for the selected style."""
+    if style == "windows":
+        return "\\"
+    elif style in ("linux", "macos"):
+        return "/"
+    else:  # auto — detect from current OS
+        return os.sep
+
 
 def _get_output_dir():
     """Return ComfyUI output directory, with fallback for standalone use."""
@@ -18,7 +36,35 @@ def _get_output_dir():
         import folder_paths
         return folder_paths.get_output_directory()
     except Exception:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
+        return str(Path(__file__).resolve().parent / "output")
+
+
+def _get_current_os() -> str:
+    """Return the detected OS name for display."""
+    if sys.platform == "win32":
+        return "Windows"
+    elif sys.platform == "darwin":
+        return "macOS"
+    else:
+        return "Linux"
+
+
+# Common input file patterns that should not be used as output folder names.
+# If source_filename looks like one of these, fall back to the label instead.
+_INPUT_FILE_PATTERNS = re.compile(
+    r"^(ComfyUI_temp_|input_|ref_|reference_)"
+    r"|^\d{5,}_\.png$"  # ComfyUI temp uploads like 00001_.png
+    r"|^clipspace/",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_input_file(filename: str) -> bool:
+    """Return True if filename appears to be a ComfyUI input/temp file
+    rather than a meaningful output name."""
+    if not filename:
+        return False
+    return bool(_INPUT_FILE_PATTERNS.search(filename))
 
 
 def _scan_next_version(scan_dir, prefix, padding):
@@ -28,13 +74,14 @@ def _scan_next_version(scan_dir, prefix, padding):
     If no version folders exist yet → returns 1.
     Purely filesystem-based: cancelling a run cannot "waste" a number.
     """
-    if not os.path.isdir(scan_dir):
+    scan_path = Path(scan_dir)
+    if not scan_path.is_dir():
         return 1
     pattern = re.compile(rf"^{re.escape(prefix)}(\d{{{padding},}})$")
     max_ver = 0
-    for entry in os.listdir(scan_dir):
-        if os.path.isdir(os.path.join(scan_dir, entry)):
-            m = pattern.match(entry)
+    for entry in scan_path.iterdir():
+        if entry.is_dir():
+            m = pattern.match(entry.name)
             if m:
                 max_ver = max(max_ver, int(m.group(1)))
     return max_ver + 1
@@ -80,6 +127,13 @@ class FolderIncrementer:
                     "default": "MM-DD-YYYY",
                     "tooltip": "Date format for the date subfolder (e.g. 02-22-2026 or 2026-02-22)",
                 }),
+                "path_style": (PATH_STYLE_CHOICES, {
+                    "default": "auto",
+                    "tooltip": "Path separator style for output strings. "
+                               "auto=detect from current OS, windows=backslash, "
+                               "linux/macos=forward slash. Use 'auto' unless you "
+                               "design workflows on one OS and run on another.",
+                }),
             },
             "optional": {
                 "trigger": ("*", {
@@ -105,13 +159,17 @@ class FolderIncrementer:
         return float("NaN")
 
     def increment(self, prefix="v", padding=3, label="default",
-                  date_format="MM-DD-YYYY",
+                  date_format="MM-DD-YYYY", path_style="auto",
                   trigger=None, source_filename="", base_path=""):
 
+        sep = _get_path_sep(path_style)
+        detected_os = _get_current_os()
+
         # ── 1. Derive names from source file ──────────────────────────
-        if source_filename and source_filename.strip():
-            basename = os.path.basename(source_filename.strip())
-            name_no_ext, ext = os.path.splitext(basename)  # "SC_30_SHT50", ".mp4"
+        if source_filename and source_filename.strip() and not _looks_like_input_file(source_filename.strip()):
+            basename = Path(source_filename.strip()).name
+            name_no_ext = Path(basename).stem       # "SC_30_SHT50"
+            ext = Path(basename).suffix             # ".mp4"
             folder_name = name_no_ext
         else:
             name_no_ext = ""
@@ -119,9 +177,10 @@ class FolderIncrementer:
             folder_name = label
 
         # ── 2. Resolve base directory ─────────────────────────────────
-        base_dir = (base_path.strip()
-                    if base_path and base_path.strip()
-                    else _get_output_dir())
+        if base_path and base_path.strip():
+            base_dir = Path(base_path.strip())
+        else:
+            base_dir = Path(_get_output_dir())
 
         # ── 3. Build date folder ─────────────────────────────────────
         fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
@@ -129,28 +188,25 @@ class FolderIncrementer:
 
         # ── 4. Scan for next version INSIDE the date folder ───────────
         #    Structure: base_dir / folder_name / today_date / v###
-        date_dir = os.path.join(base_dir, folder_name, today_date)
+        date_dir = base_dir / folder_name / today_date
         version_num = _scan_next_version(date_dir, prefix, padding)
         version_string = f"{prefix}{str(version_num).zfill(padding)}"
 
-        # ── 5. Build output paths ─────────────────────────────────────
+        # ── 5. Build output paths using chosen separator ──────────────
         #    NOTE: We do NOT create the directory here.  ComfyUI's
         #    get_save_image_path() calls os.makedirs(full_output_folder,
         #    exist_ok=True) automatically when the downstream Save node
         #    runs.  Creating it here would leave empty version folders
         #    on every queue (because IS_CHANGED returns NaN).
-        # subfolder_path : "SC_30_SHT50/02-22-2026/v001"
-        subfolder_path = f"{folder_name}/{today_date}/{version_string}"
+        subfolder_path = sep.join([folder_name, today_date, version_string])
 
-        # filename_prefix: "SC_30_SHT50/02-22-2026/v001/SC_30_SHT50"
         if name_no_ext:
-            filename_prefix = f"{subfolder_path}/{name_no_ext}"
+            filename_prefix = sep.join([subfolder_path, name_no_ext])
         else:
-            filename_prefix = f"{subfolder_path}/{version_string}"
+            filename_prefix = sep.join([subfolder_path, version_string])
 
-        # output_filename: "SC_30_SHT50/02-22-2026/v001/SC_30_SHT50.mp4"
         if name_no_ext and ext:
-            output_filename = f"{subfolder_path}/{name_no_ext}{ext}"
+            output_filename = sep.join([subfolder_path, f"{name_no_ext}{ext}"])
         else:
             output_filename = filename_prefix
 
@@ -197,10 +253,10 @@ class FolderIncrementerReset:
 
     def check(self, label="default", date_format="MM-DD-YYYY",
                trigger=None, base_path=""):
-        base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
+        base_dir = Path(base_path.strip()) if base_path and base_path.strip() else Path(_get_output_dir())
         fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
         today_date = datetime.now().strftime(fmt)
-        scan_dir = os.path.join(base_dir, label, today_date)
+        scan_dir = base_dir / label / today_date
         next_ver = _scan_next_version(scan_dir, "v", 3)
         current  = next_ver - 1
         if current < 1:
@@ -251,13 +307,13 @@ class FolderIncrementerSet:
     def set_version(self, label="default", value=1, trigger=None,
                     prefix="v", padding=3, base_path="",
                     date_format="MM-DD-YYYY"):
-        base_dir = base_path.strip() if base_path and base_path.strip() else _get_output_dir()
+        base_dir = Path(base_path.strip()) if base_path and base_path.strip() else Path(_get_output_dir())
         fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
         today_date = datetime.now().strftime(fmt)
-        folder = os.path.join(base_dir, label, today_date)
+        folder = base_dir / label / today_date
         for i in range(1, value + 1):
-            ver_dir = os.path.join(folder, f"{prefix}{str(i).zfill(padding)}")
-            os.makedirs(ver_dir, exist_ok=True)
+            ver_dir = folder / f"{prefix}{str(i).zfill(padding)}"
+            ver_dir.mkdir(parents=True, exist_ok=True)
         next_ver = value + 1
         return (f"Reserved v001–v{str(value).zfill(padding)} for '{label}/{today_date}'. "
                 f"Next = v{str(next_ver).zfill(padding)}",

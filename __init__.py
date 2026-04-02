@@ -50,6 +50,9 @@ from .nodes.temporal_anchor import TemporalAnchorMEC
 from .nodes.sam_multi_mask_picker import SamMultiMaskPickerMEC
 from .nodes.inpaint_suite import InpaintCropProMEC, InpaintStitchProMEC, InpaintMaskPrepareMEC, InpaintPasteBackMEC
 from .nodes.image_comparer import ImageComparerMEC
+from .nodes.spline_mask_editor import SplineMaskEditorMEC
+from .nodes.motion_mask_tracker import MotionMaskTrackerMEC
+from .nodes.mask_draw_frame import DrawCircleMEC, DrawRectangleMEC, DrawEllipseMEC, DrawPolygonMEC, DrawLineMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -88,6 +91,13 @@ _MEC_MAPPINGS = {
     "InpaintMaskPrepareMEC": InpaintMaskPrepareMEC,
     "InpaintPasteBackMEC": InpaintPasteBackMEC,
     "ImageComparerMEC": ImageComparerMEC,
+    "SplineMaskEditorMEC": SplineMaskEditorMEC,
+    "MotionMaskTrackerMEC": MotionMaskTrackerMEC,
+    "DrawCircleMEC": DrawCircleMEC,
+    "DrawRectangleMEC": DrawRectangleMEC,
+    "DrawEllipseMEC": DrawEllipseMEC,
+    "DrawPolygonMEC": DrawPolygonMEC,
+    "DrawLineMEC": DrawLineMEC,
 }
 
 _MEC_DISPLAY = {
@@ -127,6 +137,13 @@ _MEC_DISPLAY = {
     "InpaintMaskPrepareMEC": "Inpaint Mask Prepare (MEC)",
     "InpaintPasteBackMEC": "Inpaint Paste Back (MEC)",
     "ImageComparerMEC": "Image Comparer (MEC)",
+    "SplineMaskEditorMEC": "Spline Mask Editor (MEC)",
+    "MotionMaskTrackerMEC": "Motion Mask Tracker (MEC)",
+    "DrawCircleMEC": "Draw Circle (MEC)",
+    "DrawRectangleMEC": "Draw Rectangle (MEC)",
+    "DrawEllipseMEC": "Draw Ellipse (MEC)",
+    "DrawPolygonMEC": "Draw Polygon (MEC)",
+    "DrawLineMEC": "Draw Line (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────

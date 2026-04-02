@@ -552,9 +552,16 @@ def _parse_coords_for_batch(coords_json: str, batch_size: int) -> list:
 #  Simplified interfaces delegating to MaskDrawFrame.draw()
 # ══════════════════════════════════════════════════════════════════════
 
-class DrawCircleMEC:
-    """Draw a circle mask with explicit center/radius parameters.
+class DrawShapeMEC:
+    """Unified shape drawing node — one dropdown for all 12 shapes.
+    Parameters for all shapes visible; irrelevant ones are ignored per shape.
     Accepts coords_json from Points Mask Editor for per-frame positioning."""
+
+    SHAPES = [
+        "circle", "rectangle", "ellipse", "polygon", "line",
+        "triangle", "star", "diamond", "cross", "rounded_rectangle",
+        "heart", "arrow",
+    ]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -564,23 +571,76 @@ class DrawCircleMEC:
                     "tooltip": "Canvas width in pixels."}),
                 "height": ("INT", {"default": 512, "min": 1, "max": 16384,
                     "tooltip": "Canvas height in pixels."}),
+                "shape": (cls.SHAPES, {"default": "circle",
+                    "tooltip": "Shape type to draw. Parameters below adapt per shape."}),
+                # ── Position (used by most shapes) ──
                 "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Circle center X. Overridden by coords_json if provided."}),
+                    "tooltip": "Center X — used by: circle, ellipse, triangle, star, diamond, cross, heart, arrow."}),
                 "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Circle center Y. Overridden by coords_json if provided."}),
-                "radius": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Circle radius in pixels."}),
+                    "tooltip": "Center Y — used by: circle, ellipse, triangle, star, diamond, cross, heart, arrow."}),
+                # ── Size params ──
+                "radius": ("FLOAT", {"default": 50.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Radius — circle. Also used as 'size' for triangle/heart."}),
+                "size_w": ("FLOAT", {"default": 200.0, "min": 0.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Width — rectangle, rounded_rectangle, diamond, arrow(width)."}),
+                "size_h": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Height — rectangle, rounded_rectangle, diamond."}),
+                "rx": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Radius X — ellipse."}),
+                "ry": ("FLOAT", {"default": 50.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Radius Y — ellipse."}),
+                "top_left_x": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Top-left X — rectangle, rounded_rectangle. Also line start X."}),
+                "top_left_y": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Top-left Y — rectangle, rounded_rectangle. Also line start Y."}),
+                # ── Line params ──
+                "x2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Line end X."}),
+                "y2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Line end Y."}),
+                "thickness": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 500.0, "step": 0.5,
+                    "tooltip": "Thickness — line, cross."}),
+                # ── Star params ──
+                "outer_r": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Outer radius — star."}),
+                "inner_r": ("FLOAT", {"default": 40.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Inner radius — star."}),
+                "num_points": ("INT", {"default": 5, "min": 3, "max": 50,
+                    "tooltip": "Number of points/sides — star, polygon."}),
+                # ── Rounded rect / cross ──
+                "corner_radius": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 4096.0, "step": 0.5,
+                    "tooltip": "Corner radius — rounded_rectangle."}),
+                "cross_size": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Arm length — cross."}),
+                # ── Arrow params ──
+                "arrow_length": ("FLOAT", {"default": 200.0, "min": 0.0, "max": 16384.0, "step": 0.5,
+                    "tooltip": "Total length — arrow."}),
+                "head_length": ("FLOAT", {"default": 60.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Head length — arrow."}),
+                "head_width": ("FLOAT", {"default": 80.0, "min": 0.0, "max": 8192.0, "step": 0.5,
+                    "tooltip": "Head width — arrow."}),
+                # ── Polygon points (JSON) ──
+                "points_json": ("STRING", {
+                    "default": '[[100,100],[400,100],[400,400],[100,400]]',
+                    "multiline": True,
+                    "tooltip": "Vertex list for polygon: [[x1,y1],[x2,y2],...]. Only used when shape=polygon.",
+                }),
+                # ── Common ──
                 "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Fill intensity (0.0–1.0)."}),
                 "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
                     "tooltip": "Soft edge feathering in pixels."}),
+                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5,
+                    "tooltip": "Rotation angle in degrees."}),
+                "operation": (["set", "add", "subtract", "max", "min"], {"default": "set",
+                    "tooltip": "How to combine with existing mask."}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 256,
                     "tooltip": "Number of mask frames to generate."}),
             },
             "optional": {
                 "coords_json": ("STRING", {"default": "",
                     "tooltip": "Per-frame position override from Points Mask Editor. "
-                               "JSON: {cx,cy} or [{cx,cy,radius},...] per frame."}),
+                               "JSON dict or list of dicts with shape-specific keys."}),
                 "existing_mask": ("MASK",),
                 "reference_image": ("IMAGE",),
             },
@@ -589,276 +649,303 @@ class DrawCircleMEC:
     RETURN_TYPES = ("MASK",)
     FUNCTION = "draw"
     CATEGORY = "MaskEditControl/Draw"
-    DESCRIPTION = "Draw a circle on a mask. Connect coords_json from Points Mask Editor for interactive positioning."
+    DESCRIPTION = (
+        "Unified shape drawing: pick any of 12 shapes from the dropdown.\n"
+        "Parameters adapt per shape — unused ones are simply ignored.\n"
+        "Shapes: circle, rectangle, ellipse, polygon, line, triangle, star,\n"
+        "diamond, cross, rounded_rectangle, heart, arrow."
+    )
 
-    def draw(self, width, height, cx, cy, radius, value, feather, batch_size,
-             coords_json="", existing_mask=None, reference_image=None):
-        drawer = MaskDrawFrame()
-        frames = _parse_coords_for_batch(coords_json, batch_size) if coords_json else [{}] * batch_size
-        results = []
-        for i in range(batch_size):
-            fc = frames[i]
-            params = {
-                "cx": fc.get("cx", cx),
-                "cy": fc.get("cy", cy),
-                "radius": fc.get("radius", radius),
+    def _build_params(self, shape, fc, **kw):
+        """Build shape_params_json dict from widget values + per-frame overrides."""
+        if shape == "circle":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "radius": fc.get("radius", kw["radius"]),
             }
-            frame_mask = existing_mask[i:i+1] if (existing_mask is not None and i < existing_mask.shape[0]) else existing_mask
-            result = drawer.draw(width, height, "circle", json.dumps(params),
-                                 value, feather, 0.0, "set",
-                                 existing_mask=frame_mask, reference_image=reference_image)
-            results.append(result[0])
-        return (torch.cat(results, dim=0),)
-
-
-class DrawRectangleMEC:
-    """Draw a rectangle mask with explicit position/size parameters.
-    Accepts coords_json from Points Mask Editor for per-frame positioning."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas width in pixels."}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas height in pixels."}),
-                "x": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Rectangle top-left X. Overridden by coords_json if provided."}),
-                "y": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Rectangle top-left Y. Overridden by coords_json if provided."}),
-                "w": ("FLOAT", {"default": 200.0, "min": 1.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Rectangle width."}),
-                "h": ("FLOAT", {"default": 100.0, "min": 1.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Rectangle height."}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Fill intensity (0.0–1.0)."}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
-                    "tooltip": "Soft edge feathering in pixels."}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5,
-                    "tooltip": "Rotation angle in degrees."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256,
-                    "tooltip": "Number of mask frames to generate."}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": "",
-                    "tooltip": "Per-frame position override. JSON: {x,y,w,h} or list per frame."}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-
-    RETURN_TYPES = ("MASK",)
-    FUNCTION = "draw"
-    CATEGORY = "MaskEditControl/Draw"
-    DESCRIPTION = "Draw a rectangle on a mask. Connect coords_json from Points Mask Editor for interactive positioning."
-
-    def draw(self, width, height, x, y, w, h, value, feather, rotation, batch_size,
-             coords_json="", existing_mask=None, reference_image=None):
-        drawer = MaskDrawFrame()
-        frames = _parse_coords_for_batch(coords_json, batch_size) if coords_json else [{}] * batch_size
-        results = []
-        for i in range(batch_size):
-            fc = frames[i]
-            params = {
-                "x": fc.get("x", x),
-                "y": fc.get("y", y),
-                "w": fc.get("w", w),
-                "h": fc.get("h", h),
+        elif shape == "rectangle":
+            return {
+                "x": fc.get("x", kw["top_left_x"]),
+                "y": fc.get("y", kw["top_left_y"]),
+                "w": fc.get("w", kw["size_w"]),
+                "h": fc.get("h", kw["size_h"]),
             }
-            frame_mask = existing_mask[i:i+1] if (existing_mask is not None and i < existing_mask.shape[0]) else existing_mask
-            result = drawer.draw(width, height, "rectangle", json.dumps(params),
-                                 value, feather, rotation, "set",
-                                 existing_mask=frame_mask, reference_image=reference_image)
-            results.append(result[0])
-        return (torch.cat(results, dim=0),)
-
-
-class DrawEllipseMEC:
-    """Draw an ellipse mask with explicit center/radii parameters.
-    Accepts coords_json from Points Mask Editor for per-frame positioning."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas width in pixels."}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas height in pixels."}),
-                "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Ellipse center X."}),
-                "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Ellipse center Y."}),
-                "rx": ("FLOAT", {"default": 100.0, "min": 1.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Radius along X axis."}),
-                "ry": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Radius along Y axis."}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Fill intensity (0.0–1.0)."}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
-                    "tooltip": "Soft edge feathering in pixels."}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5,
-                    "tooltip": "Rotation angle in degrees."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256,
-                    "tooltip": "Number of mask frames to generate."}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": "",
-                    "tooltip": "Per-frame position override. JSON: {cx,cy,rx,ry} or list per frame."}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-
-    RETURN_TYPES = ("MASK",)
-    FUNCTION = "draw"
-    CATEGORY = "MaskEditControl/Draw"
-    DESCRIPTION = "Draw an ellipse on a mask. Connect coords_json from Points Mask Editor for interactive positioning."
-
-    def draw(self, width, height, cx, cy, rx, ry, value, feather, rotation, batch_size,
-             coords_json="", existing_mask=None, reference_image=None):
-        drawer = MaskDrawFrame()
-        frames = _parse_coords_for_batch(coords_json, batch_size) if coords_json else [{}] * batch_size
-        results = []
-        for i in range(batch_size):
-            fc = frames[i]
-            params = {
-                "cx": fc.get("cx", cx),
-                "cy": fc.get("cy", cy),
-                "rx": fc.get("rx", rx),
-                "ry": fc.get("ry", ry),
+        elif shape == "ellipse":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "rx": fc.get("rx", kw["rx"]),
+                "ry": fc.get("ry", kw["ry"]),
                 "angle": fc.get("angle", 0),
             }
+        elif shape == "polygon":
+            if "points" in fc:
+                return {"points": fc["points"]}
+            return kw["points_json"]  # raw JSON string
+        elif shape == "line":
+            return {
+                "x1": fc.get("x1", kw["top_left_x"]),
+                "y1": fc.get("y1", kw["top_left_y"]),
+                "x2": fc.get("x2", kw["x2"]),
+                "y2": fc.get("y2", kw["y2"]),
+                "thickness": fc.get("thickness", kw["thickness"]),
+            }
+        elif shape == "triangle":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "size": fc.get("size", kw["radius"]),
+            }
+        elif shape == "star":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "outer_r": fc.get("outer_r", kw["outer_r"]),
+                "inner_r": fc.get("inner_r", kw["inner_r"]),
+                "num_points": fc.get("num_points", kw["num_points"]),
+            }
+        elif shape == "diamond":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "w": fc.get("w", kw["size_w"]),
+                "h": fc.get("h", kw["size_h"]),
+            }
+        elif shape == "cross":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "size": fc.get("size", kw["cross_size"]),
+                "thickness": fc.get("thickness", kw["thickness"]),
+            }
+        elif shape == "rounded_rectangle":
+            return {
+                "x": fc.get("x", kw["top_left_x"]),
+                "y": fc.get("y", kw["top_left_y"]),
+                "w": fc.get("w", kw["size_w"]),
+                "h": fc.get("h", kw["size_h"]),
+                "corner_radius": fc.get("corner_radius", kw["corner_radius"]),
+            }
+        elif shape == "heart":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "size": fc.get("size", kw["radius"]),
+            }
+        elif shape == "arrow":
+            return {
+                "cx": fc.get("cx", kw["cx"]),
+                "cy": fc.get("cy", kw["cy"]),
+                "length": fc.get("length", kw["arrow_length"]),
+                "width": fc.get("width", kw["size_w"]),
+                "head_length": fc.get("head_length", kw["head_length"]),
+                "head_width": fc.get("head_width", kw["head_width"]),
+            }
+        return {}
+
+    def draw(self, width, height, shape, cx, cy, radius, size_w, size_h,
+             rx, ry, top_left_x, top_left_y, x2, y2, thickness,
+             outer_r, inner_r, num_points, corner_radius, cross_size,
+             arrow_length, head_length, head_width, points_json,
+             value, feather, rotation, operation, batch_size,
+             coords_json="", existing_mask=None, reference_image=None):
+
+        drawer = MaskDrawFrame()
+        frames = _parse_coords_for_batch(coords_json, batch_size) if coords_json else [{}] * batch_size
+        kw = dict(cx=cx, cy=cy, radius=radius, size_w=size_w, size_h=size_h,
+                  rx=rx, ry=ry, top_left_x=top_left_x, top_left_y=top_left_y,
+                  x2=x2, y2=y2, thickness=thickness,
+                  outer_r=outer_r, inner_r=inner_r, num_points=num_points,
+                  corner_radius=corner_radius, cross_size=cross_size,
+                  arrow_length=arrow_length, head_length=head_length,
+                  head_width=head_width, points_json=points_json)
+
+        results = []
+        for i in range(batch_size):
+            fc = frames[i]
+            params = self._build_params(shape, fc, **kw)
+            params_str = json.dumps(params) if isinstance(params, dict) else params
             frame_mask = existing_mask[i:i+1] if (existing_mask is not None and i < existing_mask.shape[0]) else existing_mask
-            result = drawer.draw(width, height, "ellipse", json.dumps(params),
-                                 value, feather, rotation, "set",
+            result = drawer.draw(width, height, shape, params_str,
+                                 value, feather, rotation, operation,
                                  existing_mask=frame_mask, reference_image=reference_image)
             results.append(result[0])
         return (torch.cat(results, dim=0),)
 
 
-class DrawPolygonMEC:
-    """Draw a polygon mask from a list of vertex points.
-    Accepts coords_json from Points Mask Editor for per-frame positioning."""
+# ── Keep old wrapper classes for backward compatibility (deprecated) ──
+# Users with existing workflows referencing these will not break.
 
+class DrawCircleMEC(DrawShapeMEC):
+    """[Deprecated] Use Draw Shape (MEC) instead. Draws a circle."""
+    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=circle."
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas width in pixels."}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas height in pixels."}),
+                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "radius": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 8192.0, "step": 0.5}),
+                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
+            },
+            "optional": {
+                "coords_json": ("STRING", {"default": ""}),
+                "existing_mask": ("MASK",),
+                "reference_image": ("IMAGE",),
+            },
+        }
+    CATEGORY = "MaskEditControl/Draw"
+    FUNCTION = "draw_circle"
+    def draw_circle(self, width, height, cx, cy, radius, value, feather, batch_size,
+                    coords_json="", existing_mask=None, reference_image=None):
+        return self.draw(width, height, "circle", cx, cy, radius,
+                         200, 100, 100, 50, 100, 100, 400, 400, 5,
+                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
+                         value, feather, 0.0, "set", batch_size,
+                         coords_json, existing_mask, reference_image)
+
+
+class DrawRectangleMEC(DrawShapeMEC):
+    """[Deprecated] Use Draw Shape (MEC) instead. Draws a rectangle."""
+    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=rectangle."
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "x": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "y": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "w": ("FLOAT", {"default": 200.0, "min": 1.0, "max": 16384.0, "step": 0.5}),
+                "h": ("FLOAT", {"default": 100.0, "min": 1.0, "max": 16384.0, "step": 0.5}),
+                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
+                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
+            },
+            "optional": {
+                "coords_json": ("STRING", {"default": ""}),
+                "existing_mask": ("MASK",),
+                "reference_image": ("IMAGE",),
+            },
+        }
+    CATEGORY = "MaskEditControl/Draw"
+    FUNCTION = "draw_rect"
+    def draw_rect(self, width, height, x, y, w, h, value, feather, rotation, batch_size,
+                  coords_json="", existing_mask=None, reference_image=None):
+        return self.draw(width, height, "rectangle", 256, 256, 50,
+                         w, h, 100, 50, x, y, 400, 400, 5,
+                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
+                         value, feather, rotation, "set", batch_size,
+                         coords_json, existing_mask, reference_image)
+
+
+class DrawEllipseMEC(DrawShapeMEC):
+    """[Deprecated] Use Draw Shape (MEC) instead. Draws an ellipse."""
+    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=ellipse."
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "rx": ("FLOAT", {"default": 100.0, "min": 1.0, "max": 8192.0, "step": 0.5}),
+                "ry": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 8192.0, "step": 0.5}),
+                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
+                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
+            },
+            "optional": {
+                "coords_json": ("STRING", {"default": ""}),
+                "existing_mask": ("MASK",),
+                "reference_image": ("IMAGE",),
+            },
+        }
+    CATEGORY = "MaskEditControl/Draw"
+    FUNCTION = "draw_ellipse"
+    def draw_ellipse(self, width, height, cx, cy, rx, ry, value, feather, rotation, batch_size,
+                     coords_json="", existing_mask=None, reference_image=None):
+        return self.draw(width, height, "ellipse", cx, cy, 50,
+                         200, 100, rx, ry, 100, 100, 400, 400, 5,
+                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
+                         value, feather, rotation, "set", batch_size,
+                         coords_json, existing_mask, reference_image)
+
+
+class DrawPolygonMEC(DrawShapeMEC):
+    """[Deprecated] Use Draw Shape (MEC) instead. Draws a polygon."""
+    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=polygon."
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
                 "points_json": ("STRING", {
                     "default": '[[100,100],[400,100],[400,400],[100,400]]',
                     "multiline": True,
-                    "tooltip": "Polygon vertices as JSON list: [[x1,y1],[x2,y2],...]. Min 3 points.",
                 }),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Fill intensity (0.0–1.0)."}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
-                    "tooltip": "Soft edge feathering in pixels."}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5,
-                    "tooltip": "Rotation angle in degrees (around centroid)."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256,
-                    "tooltip": "Number of mask frames to generate."}),
+                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
+                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
             },
             "optional": {
-                "coords_json": ("STRING", {"default": "",
-                    "tooltip": "Per-frame vertex override from Points Mask Editor. "
-                               "JSON: {points:[[x,y],...]} or [{points:...},...] per frame."}),
+                "coords_json": ("STRING", {"default": ""}),
                 "existing_mask": ("MASK",),
                 "reference_image": ("IMAGE",),
             },
         }
-
-    RETURN_TYPES = ("MASK",)
-    FUNCTION = "draw"
     CATEGORY = "MaskEditControl/Draw"
-    DESCRIPTION = "Draw a polygon on a mask from vertex coordinates."
-
-    def draw(self, width, height, points_json, value, feather, rotation, batch_size,
-             coords_json="", existing_mask=None, reference_image=None):
-        drawer = MaskDrawFrame()
-        frames = _parse_coords_for_batch(coords_json, batch_size) if coords_json else [{}] * batch_size
-        results = []
-        for i in range(batch_size):
-            fc = frames[i]
-            if "points" in fc:
-                params = {"points": fc["points"]}
-            else:
-                params = points_json  # pass raw JSON; MaskDrawFrame.draw() will parse
-            frame_mask = existing_mask[i:i+1] if (existing_mask is not None and i < existing_mask.shape[0]) else existing_mask
-            result = drawer.draw(width, height, "polygon",
-                                 json.dumps(params) if isinstance(params, dict) else params,
-                                 value, feather, rotation, "set",
-                                 existing_mask=frame_mask, reference_image=reference_image)
-            results.append(result[0])
-        return (torch.cat(results, dim=0),)
+    FUNCTION = "draw_polygon"
+    def draw_polygon(self, width, height, points_json, value, feather, rotation, batch_size,
+                     coords_json="", existing_mask=None, reference_image=None):
+        return self.draw(width, height, "polygon", 256, 256, 50,
+                         200, 100, 100, 50, 100, 100, 400, 400, 5,
+                         100, 40, 5, 20, 100, 200, 60, 80, points_json,
+                         value, feather, rotation, "set", batch_size,
+                         coords_json, existing_mask, reference_image)
 
 
-class DrawLineMEC:
-    """Draw a line mask with explicit endpoints and thickness.
-    Accepts coords_json from Points Mask Editor for per-frame positioning."""
-
+class DrawLineMEC(DrawShapeMEC):
+    """[Deprecated] Use Draw Shape (MEC) instead. Draws a line."""
+    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=line."
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas width in pixels."}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384,
-                    "tooltip": "Canvas height in pixels."}),
-                "x1": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Line start X."}),
-                "y1": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Line start Y."}),
-                "x2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Line end X."}),
-                "y2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Line end Y."}),
-                "thickness": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 500.0, "step": 0.5,
-                    "tooltip": "Line thickness in pixels."}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Fill intensity (0.0–1.0)."}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
-                    "tooltip": "Soft edge feathering in pixels."}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5,
-                    "tooltip": "Rotation angle in degrees (around midpoint)."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256,
-                    "tooltip": "Number of mask frames to generate."}),
+                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
+                "x1": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "y1": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "x2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "y2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
+                "thickness": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 500.0, "step": 0.5}),
+                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
+                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
             },
             "optional": {
-                "coords_json": ("STRING", {"default": "",
-                    "tooltip": "Per-frame position override. JSON: {x1,y1,x2,y2} or list per frame."}),
+                "coords_json": ("STRING", {"default": ""}),
                 "existing_mask": ("MASK",),
                 "reference_image": ("IMAGE",),
             },
         }
-
-    RETURN_TYPES = ("MASK",)
-    FUNCTION = "draw"
     CATEGORY = "MaskEditControl/Draw"
-    DESCRIPTION = "Draw a line on a mask between two points with thickness."
-
-    def draw(self, width, height, x1, y1, x2, y2, thickness, value, feather, rotation,
-             batch_size, coords_json="", existing_mask=None, reference_image=None):
-        drawer = MaskDrawFrame()
-        frames = _parse_coords_for_batch(coords_json, batch_size) if coords_json else [{}] * batch_size
-        results = []
-        for i in range(batch_size):
-            fc = frames[i]
-            params = {
-                "x1": fc.get("x1", x1),
-                "y1": fc.get("y1", y1),
-                "x2": fc.get("x2", x2),
-                "y2": fc.get("y2", y2),
-                "thickness": fc.get("thickness", thickness),
-            }
-            frame_mask = existing_mask[i:i+1] if (existing_mask is not None and i < existing_mask.shape[0]) else existing_mask
-            result = drawer.draw(width, height, "line", json.dumps(params),
-                                 value, feather, rotation, "set",
-                                 existing_mask=frame_mask, reference_image=reference_image)
-            results.append(result[0])
-        return (torch.cat(results, dim=0),)
+    FUNCTION = "draw_line"
+    def draw_line(self, width, height, x1, y1, x2, y2, thickness, value, feather, rotation,
+                  batch_size, coords_json="", existing_mask=None, reference_image=None):
+        return self.draw(width, height, "line", 256, 256, 50,
+                         200, 100, 100, 50, x1, y1, x2, y2, thickness,
+                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
+                         value, feather, rotation, "set", batch_size,
+                         coords_json, existing_mask, reference_image)

@@ -1,46 +1,62 @@
 import { app } from "../../scripts/app.js";
 
 /**
- * MaskEditControl – Spline Mask Editor Widget
+ * MaskEditControl – Spline Mask Editor v2
  *
- * Interactive canvas for drawing closed/open spline shapes.
- * Serializes control points to the `spline_data` hidden widget
- * so the Python node can rasterize them into a mask.
+ * Complete rewrite following Olm SplineMask patterns for professional UX.
  *
- * Interaction:
- *   Left-click             → add control point to active shape
- *   Shift + Left-click     → delete hovered point
- *   Click & drag point     → move control point
- *   Middle-drag / Alt+drag → pan canvas
- *   Scroll                 → zoom (centered on cursor)
- *   N                      → new shape
- *   Z                      → undo last point add/move
- *   Delete / Backspace     → delete hovered point
- *   Escape                 → deselect active shape
- *   C                      → toggle closed/open for active shape
+ * Data model:
+ *   paths: [{ points: [[nx,ny], ...], closed: bool, mode: "smooth"|"sharp" }]
+ *   All coordinates normalized [0,1] relative to canvas dimensions.
+ *
+ * Interactions:
+ *   Left-click canvas        → add point to current path
+ *   Left-click first point   → close current path (when ≥3 pts)
+ *   Ctrl+click near segment  → insert point on curve
+ *   Shift+click point        → delete point
+ *   Right-click              → context menu
+ *   Click & drag point       → move control point
+ *   Middle-drag / Alt+drag   → pan canvas
+ *   Scroll                   → zoom (centered on cursor)
+ *   N                        → new path
+ *   Z                        → undo
+ *   Delete / Backspace       → delete hovered point
+ *   C                        → toggle closed/open
+ *   S                        → toggle smooth/sharp mode
+ *   Escape                   → deselect / close context menu
  */
 
-// ── Visual constants ─────────────────────────────────────────────────
-const CANVAS_BG        = "#181825";
-const GRID_COLOR       = "#ffffff08";
-const POINT_RADIUS     = 5;
-const POINT_COLOR      = "#22d65a";
-const POINT_HOVER      = "#80ffb0";
-const POINT_SELECTED   = "#ffdd44";
-const CURVE_COLOR      = "#4488ffcc";
-const CURVE_WIDTH      = 2;
-const FILL_COLOR       = "#4488ff22";
-const TOOLBAR_BG       = "#1e1e2eee";
-const TOOLBAR_H        = 32;
-const BTN_COLORS       = {
-    default: { bg: "#45475a", fg: "#cdd6f4", hover: "#585b70" },
+// ── Visual tuning ────────────────────────────────────────────────────
+const CANVAS_BG       = "#181825";
+const GRID_COLOR      = "#ffffff08";
+const CURVE_COLOR_ACT = "#4488ffcc";
+const CURVE_COLOR_DIM = "#88888866";
+const FILL_ACT        = "#4488ff22";
+const FILL_DIM        = "#88888810";
+const POINT_FILL      = "#22d65a";
+const POINT_HOVER     = "#80ffb0";
+const POINT_SELECTED  = "#ffdd44";
+const POINT_FIRST     = "#ff6644";
+const POINT_DIM       = "#888888";
+const HANDLE_COLOR    = "#ff8844aa";
+const HANDLE_LINE     = "#ff884466";
+const TOOLBAR_BG      = "#1e1e2eee";
+const TOOLBAR_H       = 32;
+const BTN_H           = 24;
+const BTN_PAD         = 4;
+const BTN_COLORS      = {
+    normal:  { bg: "#45475a", fg: "#cdd6f4", hover: "#585b70" },
     accent:  { bg: "#2a6040", fg: "#80ffb0", hover: "#3a7850" },
+    active:  { bg: "#4a9060", fg: "#ffffff", hover: "#5aaa70" },
     danger:  { bg: "#6c2030", fg: "#ffb0c0", hover: "#8c2840" },
 };
-const HANDLE_COLOR     = "#ff8844aa";
-const HANDLE_LINE      = "#ff884466";
-const HANDLE_RADIUS    = 4;
 
+// ── Detection thresholds (normalized) ────────────────────────────────
+const NEAR_POINT_T   = 0.025;
+const NEAR_SEGMENT_T = 0.015;
+const NEAR_FIRST_T   = 0.035;
+
+// ── Helpers ──────────────────────────────────────────────────────────
 function _roundRect(ctx, x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -55,90 +71,173 @@ function _roundRect(ctx, x, y, w, h, r) {
     ctx.closePath();
 }
 
+function dist2d(a, b) {
+    const dx = a[0] - b[0], dy = a[1] - b[1];
+    return Math.sqrt(dx * dx + dy * dy);
+}
+
+function isNear(p1, p2, threshold) {
+    return dist2d(p1, p2) < threshold;
+}
+
+function isNearSegment(pt, a, b, threshold) {
+    const abx = b[0] - a[0], aby = b[1] - a[1];
+    const len2 = abx * abx + aby * aby;
+    if (len2 < 1e-12) return { near: isNear(pt, a, threshold), t: 0 };
+    let t = ((pt[0] - a[0]) * abx + (pt[1] - a[1]) * aby) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const proj = [a[0] + t * abx, a[1] + t * aby];
+    return { near: dist2d(pt, proj) < threshold, t };
+}
+
+function catmullRomSample(points, closed, samplesPerSeg) {
+    const n = points.length;
+    if (n < 2) return points.map(p => [...p]);
+    if (n === 2) {
+        const out = [];
+        for (let i = 0; i <= samplesPerSeg; i++) {
+            const t = i / samplesPerSeg;
+            out.push([
+                points[0][0] + t * (points[1][0] - points[0][0]),
+                points[0][1] + t * (points[1][1] - points[0][1]),
+            ]);
+        }
+        return out;
+    }
+
+    const ext = [];
+    if (closed) {
+        ext.push(points[n - 1]);
+        for (const p of points) ext.push(p);
+        ext.push(points[0], points[1]);
+    } else {
+        ext.push([2 * points[0][0] - points[1][0], 2 * points[0][1] - points[1][1]]);
+        for (const p of points) ext.push(p);
+        ext.push([2 * points[n-1][0] - points[n-2][0], 2 * points[n-1][1] - points[n-2][1]]);
+    }
+
+    const segs = closed ? n : n - 1;
+    const out = [];
+    for (let s = 0; s < segs; s++) {
+        const p0 = ext[s], p1 = ext[s+1], p2 = ext[s+2], p3 = ext[s+3];
+        for (let i = 0; i < samplesPerSeg; i++) {
+            const t = i / samplesPerSeg;
+            const t2 = t * t, t3 = t2 * t;
+            const x = 0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*t +
+                (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 +
+                (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3);
+            const y = 0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*t +
+                (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 +
+                (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3);
+            out.push([x, y]);
+        }
+    }
+    if (!closed && n > 0) out.push([...points[n-1]]);
+    return out;
+}
+
+function sharpPolyline(points, closed) {
+    const out = points.map(p => [...p]);
+    if (closed && out.length >= 3) out.push([...points[0]]);
+    return out;
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class SplineEditor {
     constructor(node) {
         this.node = node;
-        // shapes: [{points: [{x,y},...], closed: bool, type: string, handles: [{cp1x,cp1y,cp2x,cp2y},...]}]
-        this.shapes = [{ points: [], closed: true, type: "catmull_rom", handles: [] }];
-        this.activeShapeIdx = 0;
-        this.zoom = 1.0;
-        this.panX = 0;
-        this.panY = 0;
-        this.hoveredPoint = -1;
-        this.selectedPoint = -1;
 
-        // Drag state
+        // Path data — normalized [0,1] coordinates
+        this.paths = [{ points: [], closed: true, mode: "smooth" }];
+        this.activePathIdx = 0;
+
+        // Canvas dimensions (set from reference image)
+        this._canvasW = 512;
+        this._canvasH = 512;
+        this._hasAutoFitted = false;
+
+        // Interaction state
+        this.hoveredPointIdx = -1;
+        this.selectedPointIdx = -1;
         this.isDragging = false;
         this.dragPointIdx = -1;
-        this.dragOriginal = null;
         this.isPanning = false;
         this.panStart = null;
 
-        // Handle drag
-        this.isDraggingHandle = false;
-        this.dragHandleType = null; // "cp1" or "cp2"
-        this.dragHandleIdx = -1;
+        // Context menu
+        this._contextMenu = null;
+
+        // Undo
+        this._undoStack = [];
 
         // Reference image
         this._refImage = null;
         this._refLoaded = false;
         this._lastRefUrl = null;
-        this._canvasW = 512;
-        this._canvasH = 512;
-        this._hasAutoFitted = false;
-
-        // Undo
-        this._undoStack = [];
 
         // Toolbar
         this._toolbarButtons = [];
         this._hoveredButton = null;
 
-        // Mouse position
-        this._mouseX = 0;
-        this._mouseY = 0;
+        // Preview bounds [x, y, w, h] in widget-local coords
+        this._previewBounds = null;
+
+        // Mouse tracking
+        this._mouseLocal = [0, 0];
     }
 
-    get activeShape() {
-        return this.shapes[this.activeShapeIdx] || null;
+    get activePath() {
+        return this.paths[this.activePathIdx] || null;
     }
 
     // ── Coordinate transforms ────────────────────────────────────────
-    screenToCanvas(sx, sy) {
-        return { x: (sx - this.panX) / this.zoom, y: (sy - this.panY) / this.zoom };
-    }
-    canvasToScreen(cx, cy) {
-        return { x: cx * this.zoom + this.panX, y: cy * this.zoom + this.panY };
+    normToScreen(nx, ny) {
+        if (!this._previewBounds) return [0, 0];
+        const [bx, by, bw, bh] = this._previewBounds;
+        return [bx + nx * bw, by + ny * bh];
     }
 
-    // ── Hit testing ──────────────────────────────────────────────────
-    findPointAt(cx, cy) {
-        const shape = this.activeShape;
-        if (!shape) return -1;
-        const threshold = Math.max(8, 10 / this.zoom);
-        for (let i = shape.points.length - 1; i >= 0; i--) {
-            const p = shape.points[i];
-            const dx = p.x - cx, dy = p.y - cy;
-            if (dx * dx + dy * dy <= threshold * threshold) return i;
+    screenToNorm(sx, sy) {
+        if (!this._previewBounds) return [0, 0];
+        const [bx, by, bw, bh] = this._previewBounds;
+        return [(sx - bx) / Math.max(bw, 1), (sy - by) / Math.max(bh, 1)];
+    }
+
+    clampNorm(nx, ny) {
+        return [Math.min(Math.max(nx, 0), 1), Math.min(Math.max(ny, 0), 1)];
+    }
+
+    // ── Hit testing (normalized coords) ──────────────────────────────
+    findPointAt(nx, ny) {
+        const path = this.activePath;
+        if (!path) return -1;
+        for (let i = path.points.length - 1; i >= 0; i--) {
+            if (isNear([nx, ny], path.points[i], NEAR_POINT_T)) return i;
         }
         return -1;
     }
 
-    findHandleAt(cx, cy) {
-        const shape = this.activeShape;
-        if (!shape || shape.type !== "bezier") return null;
-        const threshold = Math.max(6, 8 / this.zoom);
-        for (let i = shape.handles.length - 1; i >= 0; i--) {
-            const h = shape.handles[i];
-            if (!h) continue;
-            for (const type of ["cp1", "cp2"]) {
-                const hx = h[type + "x"], hy = h[type + "y"];
-                if (hx == null || hy == null) continue;
-                const dx = hx - cx, dy = hy - cy;
-                if (dx * dx + dy * dy <= threshold * threshold) {
-                    return { idx: i, type };
-                }
+    isNearFirstPoint(nx, ny) {
+        const path = this.activePath;
+        if (!path || path.points.length < 3 || path.closed) return false;
+        return isNear([nx, ny], path.points[0], NEAR_FIRST_T);
+    }
+
+    findSegmentInsert(nx, ny) {
+        const path = this.activePath;
+        if (!path || path.points.length < 2) return null;
+        const samples = this._samplePath(path);
+        if (samples.length < 2) return null;
+
+        const nPts = path.points.length;
+        const samplesPerSeg = path.mode === "smooth" ? 12 : 1;
+        const totalSegs = path.closed ? nPts : nPts - 1;
+
+        for (let i = 0; i < samples.length - 1; i++) {
+            const res = isNearSegment([nx, ny], samples[i], samples[i + 1], NEAR_SEGMENT_T);
+            if (res.near) {
+                const segIdx = Math.min(Math.floor(i / samplesPerSeg), totalSegs - 1);
+                return { segIdx, normPt: this.clampNorm(nx, ny) };
             }
         }
         return null;
@@ -146,202 +245,201 @@ class SplineEditor {
 
     // ── Undo ─────────────────────────────────────────────────────────
     _pushUndo() {
-        this._undoStack.push(JSON.stringify(this.shapes));
-        if (this._undoStack.length > 50) this._undoStack.shift();
+        this._undoStack.push(JSON.stringify(this.paths));
+        if (this._undoStack.length > 60) this._undoStack.shift();
     }
+
     undo() {
         if (this._undoStack.length === 0) return;
-        this.shapes = JSON.parse(this._undoStack.pop());
-        if (this.activeShapeIdx >= this.shapes.length) {
-            this.activeShapeIdx = Math.max(0, this.shapes.length - 1);
+        this.paths = JSON.parse(this._undoStack.pop());
+        if (this.activePathIdx >= this.paths.length) {
+            this.activePathIdx = Math.max(0, this.paths.length - 1);
         }
         this._serialize();
     }
 
-    // ── Serialize to widget ──────────────────────────────────────────
+    // ── Serialize to widget + properties ─────────────────────────────
     _serialize() {
+        // Write widget value: pixel coords for Python node compatibility
         const w = this.node.widgets?.find(w => w.name === "spline_data");
         if (w) {
-            w.value = JSON.stringify(this.shapes.map(s => ({
-                points: s.points,
-                closed: s.closed,
-                type: s.type,
-                handles: s.handles || [],
-            })));
+            const shapes = this.paths.map(p => ({
+                points: p.points.map(([nx, ny]) => ({
+                    x: nx * this._canvasW,
+                    y: ny * this._canvasH,
+                })),
+                closed: p.closed,
+                type: p.mode === "smooth" ? "catmull_rom" : "polyline",
+                handles: [],
+            }));
+            w.value = JSON.stringify(shapes);
         }
+
+        // Store normalized data in properties for lossless persistence
+        this.node.properties = this.node.properties || {};
+        const flat = [];
+        const closedFlags = [];
+        const modes = [];
+        for (const p of this.paths) {
+            closedFlags.push(p.closed);
+            modes.push(p.mode);
+            for (const pt of p.points) flat.push([pt[0], pt[1]]);
+            flat.push(null);
+        }
+        this.node.properties.spline_points = flat;
+        this.node.properties.spline_closed_flags = JSON.stringify(closedFlags);
+        this.node.properties.spline_modes = JSON.stringify(modes);
     }
 
     _deserialize() {
+        // Try property-based first (normalized, lossless)
+        const props = this.node.properties || {};
+        if (props.spline_points && Array.isArray(props.spline_points) && props.spline_points.length > 0) {
+            try {
+                const closedFlags = JSON.parse(props.spline_closed_flags || "[]");
+                const modes = JSON.parse(props.spline_modes || "[]");
+                this.paths = this._restoreFromFlat(props.spline_points, closedFlags, modes);
+                if (this.paths.length > 0 && this.paths.some(p => p.points.length > 0)) {
+                    this.activePathIdx = Math.min(this.activePathIdx, this.paths.length - 1);
+                    this._serialize();
+                    return;
+                }
+            } catch (e) { /* fall through */ }
+        }
+
+        // Fallback: widget value (pixel coords → normalize)
         const w = this.node.widgets?.find(w => w.name === "spline_data");
         if (!w || !w.value) return;
         try {
             const data = JSON.parse(w.value);
             if (Array.isArray(data) && data.length > 0) {
-                this.shapes = data.map(s => ({
-                    points: s.points || [],
+                this.paths = data.map(s => ({
+                    points: (s.points || []).map(p => {
+                        if (Array.isArray(p)) return [p[0], p[1]];
+                        const px = p.x ?? 0, py = p.y ?? 0;
+                        if (px > 1 || py > 1) {
+                            return [px / Math.max(this._canvasW, 1), py / Math.max(this._canvasH, 1)];
+                        }
+                        return [px, py];
+                    }),
                     closed: s.closed !== false,
-                    type: s.type || "catmull_rom",
-                    handles: s.handles || [],
+                    mode: s.type === "polyline" ? "sharp" : "smooth",
                 }));
-                this.activeShapeIdx = Math.min(this.activeShapeIdx, this.shapes.length - 1);
+                this.activePathIdx = Math.min(this.activePathIdx, this.paths.length - 1);
             }
-        } catch (e) { /* ignore parse errors */ }
+        } catch (e) { /* ignore */ }
     }
 
-    // ── Add point ────────────────────────────────────────────────────
-    addPoint(cx, cy) {
-        const shape = this.activeShape;
-        if (!shape) return;
-        this._pushUndo();
-        shape.points.push({ x: cx, y: cy });
-        // For bezier, add default handle (co-located with point = straight segment)
-        if (shape.type === "bezier") {
-            shape.handles.push({ cp1x: cx, cp1y: cy, cp2x: cx, cp2y: cy });
+    _restoreFromFlat(flatData, closedFlags, modes) {
+        const paths = [];
+        let current = [];
+        let pathIdx = 0;
+        for (const item of flatData) {
+            if (item === null) {
+                if (current.length > 0) {
+                    paths.push({
+                        points: current,
+                        closed: closedFlags[pathIdx] !== false,
+                        mode: modes[pathIdx] || "smooth",
+                    });
+                }
+                current = [];
+                pathIdx++;
+            } else if (Array.isArray(item) && item.length >= 2) {
+                current.push([item[0], item[1]]);
+            }
         }
+        if (current.length > 0) {
+            paths.push({
+                points: current,
+                closed: closedFlags[pathIdx] !== false,
+                mode: modes[pathIdx] || "smooth",
+            });
+        }
+        return paths.length > 0 ? paths : [{ points: [], closed: true, mode: "smooth" }];
+    }
+
+    // ── Path mutations ───────────────────────────────────────────────
+    addPoint(nx, ny) {
+        const path = this.activePath;
+        if (!path) return;
+        this._pushUndo();
+        path.points.push(this.clampNorm(nx, ny));
+        this._serialize();
+    }
+
+    insertPoint(segIdx, nx, ny) {
+        const path = this.activePath;
+        if (!path) return;
+        this._pushUndo();
+        path.points.splice(segIdx + 1, 0, this.clampNorm(nx, ny));
         this._serialize();
     }
 
     deletePoint(idx) {
-        const shape = this.activeShape;
-        if (!shape || idx < 0 || idx >= shape.points.length) return;
+        const path = this.activePath;
+        if (!path || idx < 0 || idx >= path.points.length) return;
         this._pushUndo();
-        shape.points.splice(idx, 1);
-        if (shape.handles.length > idx) shape.handles.splice(idx, 1);
-        this.selectedPoint = -1;
-        this.hoveredPoint = -1;
+        path.points.splice(idx, 1);
+        this.selectedPointIdx = -1;
+        this.hoveredPointIdx = -1;
         this._serialize();
     }
 
-    newShape() {
+    newPath() {
         this._pushUndo();
-        const type = this.activeShape?.type || "catmull_rom";
-        this.shapes.push({ points: [], closed: true, type, handles: [] });
-        this.activeShapeIdx = this.shapes.length - 1;
+        const mode = this.activePath?.mode || "smooth";
+        this.paths.push({ points: [], closed: true, mode });
+        this.activePathIdx = this.paths.length - 1;
+        this._serialize();
+    }
+
+    deletePath(idx) {
+        if (this.paths.length <= 1) {
+            this._pushUndo();
+            this.paths[0].points = [];
+            this._serialize();
+            return;
+        }
+        this._pushUndo();
+        this.paths.splice(idx, 1);
+        if (this.activePathIdx >= this.paths.length) {
+            this.activePathIdx = this.paths.length - 1;
+        }
         this._serialize();
     }
 
     toggleClosed() {
-        const shape = this.activeShape;
-        if (!shape) return;
+        const path = this.activePath;
+        if (!path) return;
         this._pushUndo();
-        shape.closed = !shape.closed;
+        path.closed = !path.closed;
         this._serialize();
     }
 
-    // ── Catmull-Rom sampling for preview ─────────────────────────────
-    _sampleCatmullRom(points, closed) {
-        const n = points.length;
-        if (n < 2) return points.map(p => [p.x, p.y]);
-        if (n === 2) {
-            const result = [];
-            for (let i = 0; i <= 20; i++) {
-                const t = i / 20;
-                result.push([
-                    points[0].x + t * (points[1].x - points[0].x),
-                    points[0].y + t * (points[1].y - points[0].y),
-                ]);
-            }
-            return result;
-        }
-
-        const ext = [];
-        if (closed) {
-            ext.push(points[n - 1]);
-            for (const p of points) ext.push(p);
-            ext.push(points[0]);
-            ext.push(points[1]);
-        } else {
-            ext.push({
-                x: 2 * points[0].x - points[1].x,
-                y: 2 * points[0].y - points[1].y,
-            });
-            for (const p of points) ext.push(p);
-            ext.push({
-                x: 2 * points[n - 1].x - points[n - 2].x,
-                y: 2 * points[n - 1].y - points[n - 2].y,
-            });
-        }
-
-        const segs = closed ? n : n - 1;
-        const samplesPerSeg = 20;
-        const result = [];
-
-        for (let seg = 0; seg < segs; seg++) {
-            const p0 = ext[seg], p1 = ext[seg + 1], p2 = ext[seg + 2], p3 = ext[seg + 3];
-            const dist = (a, b) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2) + 1e-8;
-            const d01 = Math.sqrt(dist(p0, p1));
-            const d12 = Math.sqrt(dist(p1, p2));
-            const d23 = Math.sqrt(dist(p2, p3));
-            const t0 = 0, t1 = t0 + d01, t2 = t1 + d12, t3 = t2 + d23;
-
-            for (let i = 0; i < samplesPerSeg; i++) {
-                const t = t1 + (t2 - t1) * (i / samplesPerSeg);
-                const lerp = (pa, pb, ta, tb) => {
-                    const w = (t - ta) / Math.max(tb - ta, 1e-10);
-                    return { x: pa.x + w * (pb.x - pa.x), y: pa.y + w * (pb.y - pa.y) };
-                };
-                const a1 = lerp(p0, p1, t0, t1);
-                const a2 = lerp(p1, p2, t1, t2);
-                const a3 = lerp(p2, p3, t2, t3);
-                const b1 = lerp(a1, a2, t0, t2);
-                const b2 = lerp(a2, a3, t1, t3);
-                const c = lerp(b1, b2, t1, t2);
-                result.push([c.x, c.y]);
-            }
-        }
-        if (!closed && points.length > 0) {
-            result.push([points[n - 1].x, points[n - 1].y]);
-        }
-        return result;
+    toggleMode() {
+        const path = this.activePath;
+        if (!path) return;
+        this._pushUndo();
+        path.mode = path.mode === "smooth" ? "sharp" : "smooth";
+        this._serialize();
     }
 
-    _sampleBezier(points, handles) {
-        const n = points.length;
-        if (n < 2) return points.map(p => [p.x, p.y]);
-        const result = [];
-        for (let seg = 0; seg < n - 1; seg++) {
-            const p0 = points[seg], p1 = points[seg + 1];
-            const h0 = handles[seg] || {};
-            const h1 = handles[seg + 1] || {};
-            const cp1x = h0.cp2x ?? p0.x, cp1y = h0.cp2y ?? p0.y;
-            const cp2x = h1.cp1x ?? p1.x, cp2y = h1.cp1y ?? p1.y;
-            for (let i = 0; i <= 20; i++) {
-                const t = i / 20;
-                const omt = 1 - t;
-                result.push([
-                    omt ** 3 * p0.x + 3 * omt ** 2 * t * cp1x + 3 * omt * t ** 2 * cp2x + t ** 3 * p1.x,
-                    omt ** 3 * p0.y + 3 * omt ** 2 * t * cp1y + 3 * omt * t ** 2 * cp2y + t ** 3 * p1.y,
-                ]);
-            }
-        }
-        return result;
+    clearAll() {
+        this._pushUndo();
+        this.paths = [{ points: [], closed: true, mode: "smooth" }];
+        this.activePathIdx = 0;
+        this._serialize();
     }
 
-    _sampleShape(shape) {
-        if (!shape || shape.points.length < 2) return [];
-        if (shape.type === "bezier" && shape.handles?.length > 0) {
-            return this._sampleBezier(shape.points, shape.handles);
-        }
-        if (shape.type === "polyline") {
-            const pts = shape.points.map(p => [p.x, p.y]);
-            if (shape.closed && pts.length >= 3) pts.push(pts[0]);
-            return pts;
-        }
-        return this._sampleCatmullRom(shape.points, shape.closed);
+    // ── Curve sampling ───────────────────────────────────────────────
+    _samplePath(path) {
+        if (!path || path.points.length < 2) return [];
+        if (path.mode === "sharp") return sharpPolyline(path.points, path.closed);
+        return catmullRomSample(path.points, path.closed, 12);
     }
 
-    // ── Auto-fit view ────────────────────────────────────────────────
-    autoFit(widgetW, widgetH) {
-        const drawH = widgetH - TOOLBAR_H;
-        if (drawH <= 0) return;
-        const scaleX = widgetW / this._canvasW;
-        const scaleY = drawH / this._canvasH;
-        this.zoom = Math.min(scaleX, scaleY) * 0.95;
-        this.panX = (widgetW - this._canvasW * this.zoom) / 2;
-        this.panY = TOOLBAR_H + (drawH - this._canvasH * this.zoom) / 2;
-    }
-
-    // ── Reference image loading ──────────────────────────────────────
+    // ── Reference image ──────────────────────────────────────────────
     _updateRefImage() {
         const imgWidget = this.node.widgets?.find(w => w.name === "reference_image_url");
         const url = imgWidget?.value;
@@ -360,35 +458,123 @@ class SplineEditor {
         img.src = url;
     }
 
-    // ── Build toolbar ────────────────────────────────────────────────
-    _buildToolbar(w) {
-        const btns = [];
-        let x = 6;
-        const mkBtn = (label, style, action) => {
-            const colors = BTN_COLORS[style] || BTN_COLORS.default;
-            const bw = Math.max(50, label.length * 8 + 16);
-            btns.push({ x, y: 4, w: bw, h: TOOLBAR_H - 8, label, colors, action });
-            x += bw + 4;
-        };
-        mkBtn("New Shape", "accent", () => this.newShape());
-        mkBtn("Toggle Closed", "default", () => this.toggleClosed());
-        mkBtn("Undo (Z)", "default", () => this.undo());
-        mkBtn("Clear All", "danger", () => {
-            this._pushUndo();
-            this.shapes = [{ points: [], closed: true, type: this.activeShape?.type || "catmull_rom", handles: [] }];
-            this.activeShapeIdx = 0;
-            this._serialize();
-        });
+    // ── Auto-fit preview bounds ──────────────────────────────────────
+    autoFit(widgetW, widgetH) {
+        const drawH = widgetH - TOOLBAR_H;
+        if (drawH <= 0 || this._canvasW <= 0 || this._canvasH <= 0) return;
+        const aspect = this._canvasW / this._canvasH;
+        const padFrac = 0.95;
 
-        // Shape selector (cycle through shapes)
-        const shapeCount = this.shapes.length;
-        if (shapeCount > 1) {
-            mkBtn(`Shape ${this.activeShapeIdx + 1}/${shapeCount}`, "default", () => {
-                this.activeShapeIdx = (this.activeShapeIdx + 1) % this.shapes.length;
+        let drawW = widgetW * padFrac;
+        let dh = drawW / aspect;
+        if (dh > drawH * padFrac) {
+            dh = drawH * padFrac;
+            drawW = dh * aspect;
+        }
+
+        this._previewBounds = [
+            (widgetW - drawW) / 2,
+            TOOLBAR_H + (drawH - dh) / 2,
+            drawW,
+            dh,
+        ];
+    }
+
+    // ── Build toolbar ────────────────────────────────────────────────
+    _buildToolbar(widgetW) {
+        const btns = [];
+        let x = BTN_PAD;
+
+        const mkBtn = (label, style, action) => {
+            const bw = Math.max(50, label.length * 7 + 14);
+            btns.push({ x, y: BTN_PAD, w: bw, h: BTN_H, label, style, action });
+            x += bw + BTN_PAD;
+        };
+
+        const path = this.activePath;
+        mkBtn("New Path", "accent", () => this.newPath());
+        mkBtn(path?.closed ? "Closed" : "Open", path?.closed ? "active" : "normal", () => this.toggleClosed());
+        mkBtn(path?.mode === "smooth" ? "Smooth" : "Sharp", path?.mode === "smooth" ? "active" : "normal", () => this.toggleMode());
+        mkBtn("Undo", "normal", () => this.undo());
+        mkBtn("Clear", "danger", () => this.clearAll());
+
+        if (this.paths.length > 1) {
+            mkBtn(`Path ${this.activePathIdx + 1}/${this.paths.length}`, "normal", () => {
+                this.activePathIdx = (this.activePathIdx + 1) % this.paths.length;
             });
         }
 
         this._toolbarButtons = btns;
+    }
+
+    // ── Context menu ─────────────────────────────────────────────────
+    _showContextMenu(localX, localY) {
+        const items = [];
+        const [nx, ny] = this.screenToNorm(localX, localY);
+        const pi = this.findPointAt(nx, ny);
+
+        if (pi >= 0) {
+            items.push({ label: "Delete Point", action: () => this.deletePoint(pi) });
+        }
+
+        const path = this.activePath;
+        if (path) {
+            items.push({ label: path.closed ? "Open Path" : "Close Path", action: () => this.toggleClosed() });
+            items.push({ label: path.mode === "smooth" ? "Switch to Sharp" : "Switch to Smooth", action: () => this.toggleMode() });
+            if (path.points.length > 0) {
+                items.push({ label: "Delete This Path", action: () => this.deletePath(this.activePathIdx) });
+            }
+        }
+
+        items.push({ label: "New Path", action: () => this.newPath() });
+        items.push({ label: "Clear All", action: () => this.clearAll() });
+
+        this._contextMenu = { x: localX, y: localY, items };
+    }
+
+    _hideContextMenu() { this._contextMenu = null; }
+
+    _drawContextMenu(ctx, ox, oy) {
+        const cm = this._contextMenu;
+        if (!cm) return;
+        const itemH = 24;
+        const pad = 6;
+        const maxW = Math.max(...cm.items.map(it => it.label.length * 7 + 20), 120);
+        const totalH = cm.items.length * itemH + pad * 2;
+
+        ctx.fillStyle = "#2a2a3eee";
+        _roundRect(ctx, ox + cm.x, oy + cm.y, maxW, totalH, 6);
+        ctx.fill();
+        ctx.strokeStyle = "#555577";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.font = "12px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+
+        for (let i = 0; i < cm.items.length; i++) {
+            const iy = cm.y + pad + i * itemH;
+            if (this._mouseLocal[1] >= iy && this._mouseLocal[1] < iy + itemH &&
+                this._mouseLocal[0] >= cm.x && this._mouseLocal[0] < cm.x + maxW) {
+                ctx.fillStyle = "#3a3a55";
+                ctx.fillRect(ox + cm.x + 2, oy + iy, maxW - 4, itemH);
+            }
+            ctx.fillStyle = "#cdd6f4";
+            ctx.fillText(cm.items[i].label, ox + cm.x + 10, oy + iy + itemH / 2);
+        }
+    }
+
+    _hitContextMenu(localX, localY) {
+        const cm = this._contextMenu;
+        if (!cm) return -1;
+        const itemH = 24;
+        const pad = 6;
+        const maxW = Math.max(...cm.items.map(it => it.label.length * 7 + 20), 120);
+        if (localX < cm.x || localX > cm.x + maxW) return -1;
+        const relY = localY - cm.y - pad;
+        if (relY < 0 || relY >= cm.items.length * itemH) return -1;
+        return Math.floor(relY / itemH);
     }
 
     // ── Main draw ────────────────────────────────────────────────────
@@ -400,12 +586,9 @@ class SplineEditor {
             this._deserialize();
         }
 
-        // Background
         ctx.save();
         ctx.fillStyle = CANVAS_BG;
         ctx.fillRect(widgetX, widgetY, widgetW, widgetH);
-
-        // Clip to widget
         ctx.beginPath();
         ctx.rect(widgetX, widgetY, widgetW, widgetH);
         ctx.clip();
@@ -417,9 +600,10 @@ class SplineEditor {
         ctx.fillStyle = TOOLBAR_BG;
         ctx.fillRect(ox, oy, widgetW, TOOLBAR_H);
         this._buildToolbar(widgetW);
+
         for (const btn of this._toolbarButtons) {
             const isHover = this._hoveredButton === btn;
-            const c = btn.colors;
+            const c = BTN_COLORS[btn.style] || BTN_COLORS.normal;
             ctx.fillStyle = isHover ? c.hover : c.bg;
             _roundRect(ctx, ox + btn.x, oy + btn.y, btn.w, btn.h, 4);
             ctx.fill();
@@ -430,123 +614,113 @@ class SplineEditor {
             ctx.fillText(btn.label, ox + btn.x + btn.w / 2, oy + btn.y + btn.h / 2);
         }
 
-        // ── Draw area (below toolbar) ────────────────────────────────
+        // ── Preview area ─────────────────────────────────────────────
+        if (!this._previewBounds) this.autoFit(widgetW, widgetH);
+        const [bx, by, bw, bh] = this._previewBounds || [0, TOOLBAR_H, widgetW, widgetH - TOOLBAR_H];
+
         ctx.save();
         ctx.beginPath();
-        ctx.rect(ox, oy + TOOLBAR_H, widgetW, widgetH - TOOLBAR_H);
+        ctx.rect(ox + bx - 2, oy + by - 2, bw + 4, bh + 4);
         ctx.clip();
-        ctx.translate(ox + this.panX, oy + TOOLBAR_H + this.panY - TOOLBAR_H);
-        ctx.scale(this.zoom, this.zoom);
 
         // Grid
-        const gridStep = 64;
+        const gridStepPx = 64;
         ctx.strokeStyle = GRID_COLOR;
-        ctx.lineWidth = 1 / this.zoom;
-        for (let gx = 0; gx <= this._canvasW; gx += gridStep) {
-            ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, this._canvasH); ctx.stroke();
+        ctx.lineWidth = 1;
+        for (let gx = 0; gx <= bw; gx += gridStepPx) {
+            ctx.beginPath(); ctx.moveTo(ox + bx + gx, oy + by); ctx.lineTo(ox + bx + gx, oy + by + bh); ctx.stroke();
         }
-        for (let gy = 0; gy <= this._canvasH; gy += gridStep) {
-            ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(this._canvasW, gy); ctx.stroke();
+        for (let gy = 0; gy <= bh; gy += gridStepPx) {
+            ctx.beginPath(); ctx.moveTo(ox + bx, oy + by + gy); ctx.lineTo(ox + bx + bw, oy + by + gy); ctx.stroke();
         }
 
         // Reference image
         if (this._refImage && this._refLoaded) {
             ctx.globalAlpha = 0.5;
-            ctx.drawImage(this._refImage, 0, 0, this._canvasW, this._canvasH);
+            ctx.drawImage(this._refImage, ox + bx, oy + by, bw, bh);
             ctx.globalAlpha = 1.0;
         }
 
         // Canvas border
         ctx.strokeStyle = "#ffffff33";
-        ctx.lineWidth = 1 / this.zoom;
-        ctx.strokeRect(0, 0, this._canvasW, this._canvasH);
+        ctx.lineWidth = 1;
+        ctx.strokeRect(ox + bx, oy + by, bw, bh);
 
-        // ── Draw all shapes ──────────────────────────────────────────
-        for (let si = 0; si < this.shapes.length; si++) {
-            const shape = this.shapes[si];
-            const isActive = si === this.activeShapeIdx;
-            const samples = this._sampleShape(shape);
+        // ── Draw all paths ───────────────────────────────────────────
+        const pointR = Math.max(4, Math.min(8, bw * 0.008));
+
+        for (let pi = 0; pi < this.paths.length; pi++) {
+            const path = this.paths[pi];
+            const isActive = pi === this.activePathIdx;
+            const samples = this._samplePath(path);
 
             if (samples.length >= 2) {
-                // Filled region (closed shapes)
-                if (shape.closed && samples.length >= 3) {
+                const sPts = samples.map(([nx, ny]) => {
+                    const [sx, sy] = this.normToScreen(nx, ny);
+                    return [ox + sx, oy + sy];
+                });
+
+                // Fill closed regions
+                if (path.closed && sPts.length >= 3) {
                     ctx.beginPath();
-                    ctx.moveTo(samples[0][0], samples[0][1]);
-                    for (let i = 1; i < samples.length; i++) {
-                        ctx.lineTo(samples[i][0], samples[i][1]);
-                    }
+                    ctx.moveTo(sPts[0][0], sPts[0][1]);
+                    for (let i = 1; i < sPts.length; i++) ctx.lineTo(sPts[i][0], sPts[i][1]);
                     ctx.closePath();
-                    ctx.fillStyle = isActive ? FILL_COLOR : "#88888818";
+                    ctx.fillStyle = isActive ? FILL_ACT : FILL_DIM;
                     ctx.fill();
                 }
 
-                // Curve line
+                // Curve stroke
                 ctx.beginPath();
-                ctx.moveTo(samples[0][0], samples[0][1]);
-                for (let i = 1; i < samples.length; i++) {
-                    ctx.lineTo(samples[i][0], samples[i][1]);
-                }
-                ctx.strokeStyle = isActive ? CURVE_COLOR : "#88888866";
-                ctx.lineWidth = (isActive ? CURVE_WIDTH : 1) / this.zoom;
+                ctx.moveTo(sPts[0][0], sPts[0][1]);
+                for (let i = 1; i < sPts.length; i++) ctx.lineTo(sPts[i][0], sPts[i][1]);
+                ctx.strokeStyle = isActive ? CURVE_COLOR_ACT : CURVE_COLOR_DIM;
+                ctx.lineWidth = isActive ? 2 : 1;
                 ctx.stroke();
             }
 
             // Control points
-            for (let i = 0; i < shape.points.length; i++) {
-                const p = shape.points[i];
-                const isHovered = isActive && i === this.hoveredPoint;
-                const isSelected = isActive && i === this.selectedPoint;
+            for (let i = 0; i < path.points.length; i++) {
+                const [nx, ny] = path.points[i];
+                const [sx, sy] = this.normToScreen(nx, ny);
+                const px = ox + sx, py = oy + sy;
+                const isHovered = isActive && i === this.hoveredPointIdx;
+                const isSelected = isActive && i === this.selectedPointIdx;
+                const isFirst = i === 0 && !path.closed && path.points.length >= 3;
+
+                const r = isHovered ? pointR * 1.4 : pointR;
                 ctx.beginPath();
-                ctx.arc(p.x, p.y, (isHovered ? POINT_RADIUS + 2 : POINT_RADIUS) / this.zoom, 0, Math.PI * 2);
-                ctx.fillStyle = isSelected ? POINT_SELECTED : isHovered ? POINT_HOVER : (isActive ? POINT_COLOR : "#888888");
+                ctx.arc(px, py, r, 0, Math.PI * 2);
+                ctx.fillStyle = isFirst ? POINT_FIRST :
+                                isSelected ? POINT_SELECTED :
+                                isHovered ? POINT_HOVER :
+                                isActive ? POINT_FILL : POINT_DIM;
                 ctx.fill();
                 ctx.strokeStyle = "#000000aa";
-                ctx.lineWidth = 1 / this.zoom;
+                ctx.lineWidth = 1;
                 ctx.stroke();
 
-                // Point number
                 if (isActive) {
+                    const fontSize = Math.max(9, Math.min(12, bw * 0.015));
                     ctx.fillStyle = "#ffffffcc";
-                    ctx.font = `${Math.round(10 / this.zoom)}px sans-serif`;
+                    ctx.font = `${Math.round(fontSize)}px sans-serif`;
                     ctx.textAlign = "center";
                     ctx.textBaseline = "bottom";
-                    ctx.fillText(String(i + 1), p.x, p.y - (POINT_RADIUS + 3) / this.zoom);
-                }
-            }
-
-            // Bezier handles (active shape only)
-            if (isActive && shape.type === "bezier") {
-                for (let i = 0; i < shape.handles.length; i++) {
-                    const h = shape.handles[i];
-                    const p = shape.points[i];
-                    if (!h || !p) continue;
-                    for (const type of ["cp1", "cp2"]) {
-                        const hx = h[type + "x"], hy = h[type + "y"];
-                        if (hx == null || hy == null) continue;
-                        // Line from point to handle
-                        ctx.beginPath();
-                        ctx.moveTo(p.x, p.y);
-                        ctx.lineTo(hx, hy);
-                        ctx.strokeStyle = HANDLE_LINE;
-                        ctx.lineWidth = 1 / this.zoom;
-                        ctx.stroke();
-                        // Handle dot
-                        ctx.beginPath();
-                        ctx.arc(hx, hy, HANDLE_RADIUS / this.zoom, 0, Math.PI * 2);
-                        ctx.fillStyle = HANDLE_COLOR;
-                        ctx.fill();
-                    }
+                    ctx.fillText(String(i + 1), px, py - r - 2);
                 }
             }
         }
 
-        ctx.restore();
+        ctx.restore(); // pop preview clip
 
-        // ── Status bar ───────────────────────────────────────────────
-        const shape = this.activeShape;
-        const status = shape
-            ? `Shape ${this.activeShapeIdx + 1}/${this.shapes.length} | ${shape.type} | ${shape.closed ? "closed" : "open"} | ${shape.points.length} pts`
-            : "No shapes";
+        // Context menu
+        this._drawContextMenu(ctx, ox, oy);
+
+        // Status bar
+        const path = this.activePath;
+        const nPts = path ? path.points.length : 0;
+        const status = `Path ${this.activePathIdx + 1}/${this.paths.length} | ${path?.mode || "-"} | ${path?.closed ? "closed" : "open"} | ${nPts} pts` +
+            `  ·  Click:add  Shift+click:delete  Ctrl+click:insert  Right-click:menu`;
         ctx.fillStyle = "#cdd6f4aa";
         ctx.font = "10px sans-serif";
         ctx.textAlign = "left";
@@ -556,9 +730,23 @@ class SplineEditor {
         ctx.restore();
     }
 
-    // ── Event handling ───────────────────────────────────────────────
+    // ── Event: Mouse Down ────────────────────────────────────────────
     onMouseDown(localX, localY, e) {
-        // Toolbar hit test
+        // Context menu click
+        if (this._contextMenu) {
+            const hitIdx = this._hitContextMenu(localX, localY);
+            if (hitIdx >= 0) this._contextMenu.items[hitIdx].action();
+            this._hideContextMenu();
+            return true;
+        }
+
+        // Right-click → context menu
+        if (e.button === 2) {
+            this._showContextMenu(localX, localY);
+            return true;
+        }
+
+        // Toolbar
         if (localY < TOOLBAR_H) {
             for (const btn of this._toolbarButtons) {
                 if (localX >= btn.x && localX <= btn.x + btn.w &&
@@ -570,54 +758,53 @@ class SplineEditor {
             return false;
         }
 
-        // Canvas coordinates
-        const adjustedY = localY - TOOLBAR_H;
-        const cx = (localX - this.panX) / this.zoom;
-        const cy = (adjustedY - (this.panY - TOOLBAR_H)) / this.zoom;
-
-        // Middle button or Alt = pan
+        // Pan (middle button or Alt+left)
         if (e.button === 1 || (e.button === 0 && e.altKey)) {
             this.isPanning = true;
-            this.panStart = { x: localX - this.panX, y: adjustedY - (this.panY - TOOLBAR_H) };
+            this.panStart = {
+                x: localX, y: localY,
+                pbx: this._previewBounds?.[0] || 0,
+                pby: this._previewBounds?.[1] || 0,
+            };
             return true;
         }
 
-        // Left button
+        const [nx, ny] = this.screenToNorm(localX, localY);
+
         if (e.button === 0) {
             // Shift+click = delete
             if (e.shiftKey) {
-                const pi = this.findPointAt(cx, cy);
-                if (pi >= 0) {
-                    this.deletePoint(pi);
-                    return true;
-                }
+                const pi = this.findPointAt(nx, ny);
+                if (pi >= 0) { this.deletePoint(pi); return true; }
             }
 
-            // Check handle hit (bezier)
-            const handleHit = this.findHandleAt(cx, cy);
-            if (handleHit) {
-                this.isDraggingHandle = true;
-                this.dragHandleIdx = handleHit.idx;
-                this.dragHandleType = handleHit.type;
+            // Click near first point → close path
+            if (this.isNearFirstPoint(nx, ny)) {
                 this._pushUndo();
+                this.activePath.closed = true;
+                this._serialize();
                 return true;
             }
 
-            // Check point hit for drag
-            const pi = this.findPointAt(cx, cy);
+            // Drag existing point
+            const pi = this.findPointAt(nx, ny);
             if (pi >= 0) {
                 this.isDragging = true;
                 this.dragPointIdx = pi;
-                const p = this.activeShape.points[pi];
-                this.dragOriginal = { x: p.x, y: p.y };
-                this.selectedPoint = pi;
+                this.selectedPointIdx = pi;
                 this._pushUndo();
                 return true;
             }
 
-            // Add point (only within canvas bounds)
-            if (cx >= 0 && cx <= this._canvasW && cy >= 0 && cy <= this._canvasH) {
-                this.addPoint(cx, cy);
+            // Ctrl+click near segment → insert point
+            if (e.ctrlKey) {
+                const seg = this.findSegmentInsert(nx, ny);
+                if (seg) { this.insertPoint(seg.segIdx, seg.normPt[0], seg.normPt[1]); return true; }
+            }
+
+            // Add point (within or slightly outside canvas)
+            if (nx >= -0.05 && nx <= 1.05 && ny >= -0.05 && ny <= 1.05) {
+                this.addPoint(nx, ny);
                 return true;
             }
         }
@@ -626,12 +813,7 @@ class SplineEditor {
     }
 
     onMouseMove(localX, localY) {
-        const adjustedY = localY - TOOLBAR_H;
-        const cx = (localX - this.panX) / this.zoom;
-        const cy = (adjustedY - (this.panY - TOOLBAR_H)) / this.zoom;
-
-        this._mouseX = cx;
-        this._mouseY = cy;
+        this._mouseLocal = [localX, localY];
 
         // Toolbar hover
         if (localY < TOOLBAR_H) {
@@ -643,97 +825,83 @@ class SplineEditor {
                     break;
                 }
             }
+            this.hoveredPointIdx = -1;
             return;
         }
         this._hoveredButton = null;
 
-        if (this.isPanning && this.panStart) {
-            this.panX = localX - this.panStart.x;
-            this.panY = TOOLBAR_H + adjustedY - this.panStart.y;
+        const [nx, ny] = this.screenToNorm(localX, localY);
+
+        // Panning
+        if (this.isPanning && this.panStart && this._previewBounds) {
+            this._previewBounds[0] = this.panStart.pbx + (localX - this.panStart.x);
+            this._previewBounds[1] = this.panStart.pby + (localY - this.panStart.y);
             return;
         }
 
+        // Dragging point
         if (this.isDragging && this.dragPointIdx >= 0) {
-            const shape = this.activeShape;
-            if (shape) {
-                const p = shape.points[this.dragPointIdx];
-                // Move handles along with point (bezier)
-                if (shape.type === "bezier" && shape.handles[this.dragPointIdx]) {
-                    const h = shape.handles[this.dragPointIdx];
-                    const dx = cx - p.x, dy = cy - p.y;
-                    if (h.cp1x != null) { h.cp1x += dx; h.cp1y += dy; }
-                    if (h.cp2x != null) { h.cp2x += dx; h.cp2y += dy; }
-                }
-                p.x = cx;
-                p.y = cy;
+            const path = this.activePath;
+            if (path && this.dragPointIdx < path.points.length) {
+                path.points[this.dragPointIdx] = this.clampNorm(nx, ny);
                 this._serialize();
             }
             return;
         }
 
-        if (this.isDraggingHandle && this.dragHandleIdx >= 0) {
-            const shape = this.activeShape;
-            if (shape && shape.handles[this.dragHandleIdx]) {
-                const h = shape.handles[this.dragHandleIdx];
-                h[this.dragHandleType + "x"] = cx;
-                h[this.dragHandleType + "y"] = cy;
-                this._serialize();
-            }
-            return;
-        }
-
-        // Hover detection
-        this.hoveredPoint = this.findPointAt(cx, cy);
+        // Hover
+        this.hoveredPointIdx = this.findPointAt(nx, ny);
     }
 
     onMouseUp() {
         this.isDragging = false;
         this.dragPointIdx = -1;
-        this.dragOriginal = null;
         this.isPanning = false;
         this.panStart = null;
-        this.isDraggingHandle = false;
-        this.dragHandleIdx = -1;
-        this.dragHandleType = null;
     }
 
     onWheel(localX, localY, deltaY) {
-        if (localY < TOOLBAR_H) return;
-        const adjustedY = localY - TOOLBAR_H;
-        const cx = (localX - this.panX) / this.zoom;
-        const cy = (adjustedY - (this.panY - TOOLBAR_H)) / this.zoom;
+        if (localY < TOOLBAR_H || !this._previewBounds) return;
 
-        const factor = deltaY > 0 ? 0.9 : 1.1;
-        const newZoom = Math.max(0.1, Math.min(10, this.zoom * factor));
-        this.panX = localX - cx * newZoom;
-        this.panY = TOOLBAR_H + adjustedY - cy * newZoom + TOOLBAR_H;
-        this.zoom = newZoom;
+        const [bx, by, bw, bh] = this._previewBounds;
+        const factor = deltaY > 0 ? 0.92 : 1.08;
+        const newBw = Math.max(50, Math.min(bw * 10, bw * factor));
+        const newBh = Math.max(50, Math.min(bh * 10, bh * factor));
+
+        const relX = (localX - bx) / bw;
+        const relY = (localY - by) / bh;
+        this._previewBounds = [
+            localX - relX * newBw,
+            localY - relY * newBh,
+            newBw,
+            newBh,
+        ];
     }
 
     onKeyDown(e) {
-        // Don't intercept when focused on a text input
         if (e.target?.tagName === "INPUT" || e.target?.tagName === "TEXTAREA") return false;
+
+        if (e.key === "Escape") {
+            if (this._contextMenu) { this._hideContextMenu(); return true; }
+            this.selectedPointIdx = -1;
+            return true;
+        }
 
         switch (e.key.toLowerCase()) {
             case "z":
                 if (!e.ctrlKey && !e.metaKey) { this.undo(); return true; }
                 break;
             case "n":
-                this.newShape(); return true;
+                this.newPath(); return true;
             case "c":
                 this.toggleClosed(); return true;
-            case "escape":
-                this.selectedPoint = -1; return true;
+            case "s":
+                if (!e.ctrlKey && !e.metaKey) { this.toggleMode(); return true; }
+                break;
             case "delete":
             case "backspace":
-                if (this.hoveredPoint >= 0) {
-                    this.deletePoint(this.hoveredPoint);
-                    return true;
-                }
-                if (this.selectedPoint >= 0) {
-                    this.deletePoint(this.selectedPoint);
-                    return true;
-                }
+                if (this.hoveredPointIdx >= 0) { this.deletePoint(this.hoveredPointIdx); return true; }
+                if (this.selectedPointIdx >= 0) { this.deletePoint(this.selectedPointIdx); return true; }
                 break;
         }
         return false;
@@ -749,7 +917,6 @@ app.registerExtension({
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "SplineMaskEditorMEC") return;
 
-        // Ensure spline_data widget is hidden
         const origGetExtraMenuOptions = nodeType.prototype.getExtraMenuOptions;
         nodeType.prototype.getExtraMenuOptions = function (_, options) {
             origGetExtraMenuOptions?.apply(this, arguments);
@@ -761,29 +928,28 @@ app.registerExtension({
 
         const editor = new SplineEditor(node);
 
-        // Hide the spline_data text widget from display
+        // Hide spline_data widget
         const dataWidget = node.widgets?.find(w => w.name === "spline_data");
         if (dataWidget) {
             dataWidget.type = "hidden";
             dataWidget.computeSize = () => [0, -4];
+            dataWidget.draw = () => {};
         }
 
-        // Create custom widget for the interactive editor
+        // Interactive editor widget
         const widget = node.addCustomWidget({
             name: "spline_editor_canvas",
             type: "custom",
             value: "",
             draw(ctx, node, widgetW, widgetY, widgetH) {
-                const realH = Math.max(300, widgetH || 400);
+                const realH = Math.max(300, widgetH || 440);
                 editor.draw(ctx, node.pos[0], widgetY, widgetW, realH);
             },
             computeSize(w) {
-                return [w, 420];
+                return [w, 440];
             },
             onMouseDown(e, pos, node) {
-                const localX = pos[0];
-                const localY = pos[1];
-                if (editor.onMouseDown(localX, localY, e)) {
+                if (editor.onMouseDown(pos[0], pos[1], e)) {
                     node.setDirtyCanvas(true);
                     return true;
                 }
@@ -791,11 +957,10 @@ app.registerExtension({
             },
         });
 
-        // Attach mouse move/up/wheel handlers to node
+        // Mouse move
         const origMouseMove = node.onMouseMove;
         node.onMouseMove = function (e, pos) {
             origMouseMove?.apply(this, arguments);
-            // Compute position relative to widget
             const widgetIdx = this.widgets?.indexOf(widget);
             if (widgetIdx < 0) return;
             let wy = 0;
@@ -803,18 +968,18 @@ app.registerExtension({
                 const ws = this.widgets[i].computeSize?.(this.size[0]);
                 if (ws) wy += ws[1] + 4;
             }
-            const localX = pos[0];
-            const localY = pos[1] - wy;
-            editor.onMouseMove(localX, localY);
+            editor.onMouseMove(pos[0], pos[1] - wy);
             this.setDirtyCanvas(true);
         };
 
+        // Mouse up
         const origMouseUp = node.onMouseUp;
         node.onMouseUp = function (e) {
             origMouseUp?.apply(this, arguments);
             editor.onMouseUp();
         };
 
+        // Wheel (zoom)
         const origWheel = node.onMouseWheel;
         node.onMouseWheel = function (e, pos) {
             origWheel?.apply(this, arguments);
@@ -830,6 +995,7 @@ app.registerExtension({
             return true;
         };
 
+        // Keyboard
         const origKeyDown = node.onKeyDown;
         node.onKeyDown = function (e) {
             origKeyDown?.apply(this, arguments);
@@ -839,14 +1005,14 @@ app.registerExtension({
             }
         };
 
-        // Sync on serialization
+        // Serialize
         const origOnSerialize = node.onSerialize;
         node.onSerialize = function (o) {
             editor._serialize();
             origOnSerialize?.apply(this, arguments);
         };
 
-        // Deserialize on configure (loading workflow)
+        // Deserialize
         const origOnConfigure = node.onConfigure;
         node.onConfigure = function (data) {
             origOnConfigure?.apply(this, arguments);

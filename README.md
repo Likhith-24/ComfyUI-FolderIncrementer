@@ -112,7 +112,7 @@ The ViTMatte model (~400 MB) auto-downloads from HuggingFace on first use. For o
 
 ### 5. Restart ComfyUI
 
-Look for `[MEC] Loaded 35 MaskEditControl nodes.` in the console to confirm.
+Look for `[MEC] Loaded 44 MaskEditControl nodes.` in the console to confirm.
 
 ---
 
@@ -123,10 +123,10 @@ Every node's parameters, modes, and outputs are documented in depth in the `docs
 | Guide | Nodes | What's inside |
 |-------|------:|---------------|
 | [Inpaint Suite](docs/inpaint-suite.md) | 4 | Crop Pro, Stitch Pro, Paste Back, Mask Prepare — full pipeline with fill modes, blend modes, interpolation methods |
-| [Mask Editing](docs/mask-editing.md) | 6 | Transform XY, Draw Frame (12 shapes), Composite Advanced (8 ops), Math (11 ops), Batch Manager, Preview Overlay |
+| [Mask Editing](docs/mask-editing.md) | 8 | Transform XY, Draw Frame (12 shapes), Draw Shape (unified dropdown), Composite Advanced (8 ops), Math (11 ops), Batch Manager, Preview Overlay, Spline Mask Editor |
 | [SAM & Segmentation](docs/sam-segmentation.md) | 8 | Model Loader, Mask Generator, Multi-Mask Picker, Unified Segmentation, Semantic Segment, Background Remover, both pipelines |
 | [Matting & Refinement](docs/matting-refinement.md) | 4 | Matting Node (7 backends), ViTMatte Refiner (7 methods), Trimap Generator, Luminance Keyer |
-| [Video, Temporal & BBox](docs/video-temporal-bbox.md) | 8 | Frame Extractor, Mask Propagate (5 modes), Temporal Anchor (SDF), 5 BBox nodes |
+| [Video, Temporal & BBox](docs/video-temporal-bbox.md) | 10 | Frame Extractor, Mask Propagate (5 modes), Temporal Anchor (SDF), Motion Mask Tracker (4 methods), 6 BBox nodes |
 | [Utility & Interactive](docs/utility-nodes.md) | 8 | Points Mask Editor, Image Comparer, Mask Failure Explainer, Parameter History, Universal Reroute, 3 Folder Incrementer nodes |
 
 ---
@@ -419,23 +419,40 @@ Independent per-axis mask manipulation: erode/expand, directional blur, offset, 
 
 #### Mask Draw Frame (MEC)
 
-Draw geometric shapes onto masks with feathering and blend modes.
+Low-level shape drawing. Accepts a `shape` + JSON `shape_params_json`. Supports all 12 shapes (circle, rectangle, ellipse, polygon, line, triangle, star, diamond, cross, rounded_rectangle, heart, arrow) with SDF rendering, feathering, rotation, and blend operations.
 
-| Shape | Parameters |
-|-------|-----------|
-| `circle` | `cx`, `cy`, `radius` |
-| `rectangle` | `x`, `y`, `w`, `h` |
-| `ellipse` | `cx`, `cy`, `rx`, `ry` |
-| `polygon` | `points` array of `[x, y]` |
-| `line` | `x1`, `y1`, `x2`, `y2`, `thickness` |
+> **Prefer Draw Shape (MEC)** for new workflows — it exposes all parameters as named inputs instead of raw JSON.
+
+---
+
+#### Draw Shape (MEC) ★ New
+
+Unified 12-shape drawing node with a single dropdown. All parameters are visible as named inputs with tooltips — irrelevant ones are ignored per shape. Replaces the 5 legacy per-shape wrapper nodes.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `shape` | — | Shape type |
-| `shape_data` | — | JSON with shape parameters |
-| `intensity` | `1.0` | Shape opacity |
+| `shape` | `circle` | Dropdown: circle, rectangle, ellipse, polygon, line, triangle, star, diamond, cross, rounded_rectangle, heart, arrow |
+| `cx` / `cy` | `256` | Center position (center-based shapes) |
+| `radius` | `50` | Circle radius, triangle/heart size |
+| `size_w` / `size_h` | `200` / `100` | Rectangle, rounded rect, diamond, arrow width/height |
+| `rx` / `ry` | `100` / `50` | Ellipse radii |
+| `top_left_x` / `top_left_y` | `100` | Rectangle/line start position |
+| `x2` / `y2` | `400` | Line end position |
+| `thickness` | `5` | Line, cross thickness |
+| `outer_r` / `inner_r` | `100` / `40` | Star radii |
+| `num_points` | `5` | Star/polygon point count |
+| `corner_radius` | `20` | Rounded rectangle corners |
+| `arrow_length` / `head_length` / `head_width` | — | Arrow dimensions |
+| `points_json` | — | Polygon vertices: `[[x1,y1], ...]` |
+| `value` | `1.0` | Fill intensity |
 | `feather` | `0.0` | Edge softness |
-| `blend_mode` | `set` | `set` / `add` / `multiply` / `max_` / `min_` |
+| `rotation` | `0.0` | Rotation in degrees |
+| `operation` | `set` | `set` / `add` / `subtract` / `max` / `min` |
+| `batch_size` | `1` | Number of mask frames |
+
+**Optional:** `coords_json` (per-frame position override), `existing_mask`, `reference_image`
+
+**Output:** `mask` (MASK)
 
 ---
 
@@ -657,7 +674,7 @@ Extract a single frame from a video batch.
 
 ### BBox Tools
 
-Five nodes for bounding box manipulation:
+Six nodes for bounding box manipulation:
 
 | Node | Description |
 |------|-------------|
@@ -666,6 +683,7 @@ Five nodes for bounding box manipulation:
 | **BBox To Mask** | Convert bbox to a rectangular mask |
 | **BBox Pad** | Asymmetric padding (top/bottom/left/right) with canvas clamping |
 | **BBox Crop** | Crop image + mask to bbox region |
+| **BBox Smooth Temporal** | Smooth bbox sequences across video frames (moving-average / exponential) |
 
 All BBox nodes clamp outputs to valid canvas bounds — no negative dimensions, no out-of-bounds errors.
 
@@ -742,6 +760,61 @@ Connect a `reference_image` to see it as the editor background for precise place
 
 ---
 
+#### Spline Mask Editor (MEC) ★ New
+
+Interactive canvas for drawing spline-based masks directly on your image. Supports Catmull-Rom (smooth curves through points), Bezier (with tangent handles), and polyline (straight segments) modes.
+
+| Action | Effect |
+|--------|--------|
+| **Left click** | Add control point (or close path by clicking first point) |
+| **Shift + click** | Delete point under cursor |
+| **Ctrl + click** | Insert point on nearest curve segment |
+| **Right-click** | Context menu (Delete Point, Open/Close, Smooth/Sharp) |
+| **S key** | Toggle smooth / sharp interpolation for current path |
+| **Scroll wheel** | Zoom in/out |
+| **Middle mouse drag** | Pan canvas |
+
+**Key improvements:** Normalized [0,1] coordinates (resolution-independent), zoom-relative point sizes, segment insertion, close-by-clicking-first-point affordance (highlighted orange), property-based persistence.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `spline_type` | `catmull_rom` | `catmull_rom` / `bezier` / `polyline` |
+| `closed` | `true` | Close the spline loop for filled region |
+| `smoothing` | `true` | Enable spline smoothing |
+| `samples_per_segment` | `20` | Curve resolution (higher = smoother) |
+| `feather_radius` | `0.0` | Gaussian edge softness |
+| `invert` | `false` | Fill outside spline instead of inside |
+
+**Outputs:** `mask` (MASK), `coords_json` (SAM-compatible points), `spline_data_out` (for Motion Mask Tracker)
+
+---
+
+#### Motion Mask Tracker (MEC) ★ New
+
+Per-frame motion detection with 4 independent methods and camera stabilization. Feed a video batch — get a motion mask highlighting what moved between frames.
+
+| Method | Description |
+|--------|-------------|
+| `pixel_diff` | Absolute per-pixel brightness change |
+| `optical_flow` | Farneback dense flow or phase correlation |
+| `background_sub` | Static background model from first N frames |
+| `histogram_diff` | Per-region color histogram distance |
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `camera_compensation` | `true` | Subtract global camera motion (homography/affine/translation) |
+| `detection_mode` | `combined` | `combined` / individual method |
+| `combine_method` | `union` | `union` (any triggers) / `intersection` (all agree) |
+| `grow_pixels` | `4.0` | Expand detected regions |
+| `min_region_size` | `100` | Remove noise regions < N pixels |
+| `temporal_smooth` | `true` | Gaussian smoothing across frames |
+
+**Outputs:** `motion_mask` (MASK), `motion_intensity` (FLOAT), `info` (STRING)
+
+> **Who is it for?** Video editors who need automatic motion masks for selective effects, stabilization-aware change detection, or motion-triggered workflows.
+
+---
+
 ### Preview
 
 #### Mask Preview Overlay (MEC)
@@ -808,7 +881,7 @@ Filesystem-aware auto-versioning for output files.
 
 ## Node Quick-Reference Table
 
-All 38 nodes at a glance:
+All 47 nodes at a glance:
 
 | # | Node | Category | VRAM Tier | What it does |
 |---|------|----------|-----------|-------------|
@@ -826,30 +899,35 @@ All 38 nodes at a glance:
 | 12 | Luminance Keyer | Keying | 1 | BT.709 luminance keying with smoothstep |
 | 13 | Mask Transform XY | Editing | 1 | Per-axis erode/expand/blur/offset |
 | 14 | Mask Draw Frame | Editing | 1 | Draw 12 shapes with rotation and SDF |
-| 15 | Mask Composite Advanced | Editing | 1 | Boolean/blend two masks (8 operations) |
-| 16 | Mask Math | Editing | 1 | Mathematical mask operations (11 ops) |
-| 17 | Inpaint Crop Pro | Inpaint | 1 | Crop around mask for inpainting |
-| 18 | Inpaint Stitch Pro | Inpaint | 1 | Composite inpainted result back |
-| 19 | Inpaint Paste Back | Inpaint | 1 | Simple paste-back with feathered alpha |
-| 20 | Inpaint Mask Prepare | Inpaint | 1 | Clean + dual-mask preparation |
-| 21 | Image Comparer | Preview | 1 | Interactive before/after comparison (3 modes) |
-| 22 | Mask Batch Manager | Video | 1 | Slice/concat/interleave mask batches |
-| 23 | Mask Propagate Video | Video | 1–2 | Propagate mask across video frames |
-| 24 | Temporal Anchor System | Video | 2 | SDF-based mask interpolation between keyframes |
-| 25 | Video Frame Extractor | Video | 1 | Extract single frame from batch |
-| 26 | BBox Create | BBox | 1 | Manual bbox entry |
-| 27 | BBox From Mask | BBox | 1 | Extract bbox from mask |
-| 28 | BBox To Mask | BBox | 1 | Convert bbox to mask |
-| 29 | BBox Pad | BBox | 1 | Asymmetric bbox padding |
-| 30 | BBox Crop | BBox | 1 | Crop image + mask to bbox |
-| 31 | Mask Failure Explainer | Diagnostics | 1 | Diagnose bad masks, suggest fixes |
-| 32 | Points Mask Editor | Interactive | 1 | Canvas editor for points/bboxes |
-| 33 | Mask Preview Overlay | Preview | 1 | 5-mode mask visualization |
-| 34 | Universal Reroute / Dot | Utility | 1 | Any-type wire reroute |
-| 35 | Parameter History | Utility | 1 | Track parameter changes over runs |
-| 36 | Folder Version Incrementer | Output | 1 | Auto-versioned file output |
-| 37 | Folder Version Check | Output | 1 | Check existing versions |
-| 38 | Folder Version Set | Output | 1 | Reserve version slots |
+| 15 | Draw Shape | Editing | 1 | Unified 12-shape dropdown with all params — replaces per-shape wrappers |
+| 16 | Mask Composite Advanced | Editing | 1 | Boolean/blend two masks (8 operations) |
+| 17 | Mask Math | Editing | 1 | Mathematical mask operations (11 ops) |
+| 18 | Spline Mask Editor | Interactive | 1 | Interactive Catmull-Rom / Bezier / polyline spline drawing on canvas |
+| 19 | Inpaint Crop Pro | Inpaint | 1 | Crop around mask for inpainting |
+| 20 | Inpaint Stitch Pro | Inpaint | 1 | Composite inpainted result back |
+| 21 | Inpaint Paste Back | Inpaint | 1 | Simple paste-back with feathered alpha |
+| 22 | Inpaint Mask Prepare | Inpaint | 1 | Clean + dual-mask preparation |
+| 23 | Image Comparer | Preview | 1 | Interactive before/after comparison (3 modes) |
+| 24 | Mask Batch Manager | Video | 1 | Slice/concat/interleave mask batches |
+| 25 | Mask Propagate Video | Video | 1–2 | Propagate mask across video frames |
+| 26 | Temporal Anchor System | Video | 2 | SDF-based mask interpolation between keyframes |
+| 27 | Motion Mask Tracker | Video | 1 | Per-frame motion detection (4 methods, camera stabilization) |
+| 28 | Video Frame Extractor | Video | 1 | Extract single frame from batch |
+| 29 | BBox Create | BBox | 1 | Manual bbox entry |
+| 30 | BBox From Mask | BBox | 1 | Extract bbox from mask |
+| 31 | BBox To Mask | BBox | 1 | Convert bbox to mask |
+| 32 | BBox Pad | BBox | 1 | Asymmetric bbox padding |
+| 33 | BBox Crop | BBox | 1 | Crop image + mask to bbox |
+| 34 | BBox Smooth Temporal | BBox | 1 | Smooth bbox sequences across video frames |
+| 35 | Mask Failure Explainer | Diagnostics | 1 | Diagnose bad masks, suggest fixes |
+| 36 | Points Mask Editor | Interactive | 1 | Canvas editor for points/bboxes |
+| 37 | Mask Preview Overlay | Preview | 1 | 5-mode mask visualization |
+| 38 | Universal Reroute / Dot | Utility | 1 | Any-type wire reroute |
+| 39 | Parameter History | Utility | 1 | Track parameter changes over runs |
+| 40 | Folder Version Incrementer | Output | 1 | Auto-versioned file output |
+| 41 | Folder Version Check | Output | 1 | Check existing versions |
+| 42 | Folder Version Set | Output | 1 | Reserve version slots |
+| 43–47 | Draw Circle / Rectangle / Ellipse / Polygon / Line | Editing | 1 | *(Deprecated)* Legacy per-shape wrappers — use Draw Shape instead |
 
 **VRAM Tiers:** 1 = pure tensor math (CPU/GPU, no models), 2 = loads a model (~1–4 GB), 3 = loads multiple models
 
@@ -963,6 +1041,44 @@ All 38 nodes at a glance:
 
 Install SeC: `cd ComfyUI/custom_nodes && git clone https://github.com/9nate-drake/Comfyui-SecNodes`
 
+### Spline Mask Drawing
+
+```
+[Load Image]  →  [Spline Mask Editor]
+                    spline_type: catmull_rom
+                    closed: true
+                    feather_radius: 2.0
+                       ↓
+                  mask → any mask input
+                  coords_json → SAM Mask Generator
+                  spline_data → Motion Mask Tracker
+```
+
+### Motion Detection (Video)
+
+```
+[Load Video Frames]  →  [Motion Mask Tracker]
+                           camera_compensation: true
+                           detection_mode: combined
+                           grow_pixels: 4
+                                ↓
+                          motion_mask → compositing / routing
+                          motion_intensity → Switch node
+```
+
+### Draw Shape (Quick Masking)
+
+```
+[Draw Shape (MEC)]
+   shape: star
+   cx: 256, cy: 256
+   outer_r: 100, inner_r: 40
+   num_points: 5
+   feather: 4.0
+        ↓
+   mask → downstream
+```
+
 ---
 
 ## VRAM Management
@@ -1006,7 +1122,7 @@ python -m pytest tests/test_sam_multi_mask_picker.py -v
 | Torch version mismatch after `pip install -r requirements.txt` | Reinstall your ComfyUI torch: check [PyTorch install page](https://pytorch.org/get-started/locally/) for your CUDA version |
 | SAM model not found | Place `.pth` / `.pt` / `.safetensors` in `ComfyUI/models/sams/` or `ComfyUI/models/sam2/` |
 | CUDA out of memory | Enable `offload_to_cpu` in SAM Model Loader, use `float16` dtype, reduce image resolution |
-| Nodes not showing in menu | Check console for `[MEC] Loaded 35` message. If missing, check for import errors in the console output |
+| Nodes not showing in menu | Check console for `[MEC] Loaded 44` message. If missing, check for import errors in the console output |
 | ViTMatte download fails | Download manually from [HuggingFace](https://huggingface.co/hustvl/vitmatte-small-composition-1k) → place in `ComfyUI/models/vitmatte/` |
 | My mask looks bad | Connect your image + mask to **Mask Failure Explainer** — it will diagnose the issue and suggest the right method |
 
@@ -1016,16 +1132,18 @@ python -m pytest tests/test_sam_multi_mask_picker.py -v
 
 ```
 ComfyUI-CustomNodePacks/
-├── __init__.py                     # Node registration (38 nodes)
+├── __init__.py                     # Node registration (47 nodes)
 ├── folder_incrementer.py           # FolderIncrementer nodes (3)
 ├── conftest.py                     # Pytest root configuration
 ├── pyproject.toml                  # Package metadata
 ├── requirements.txt                # Dependencies
 ├── js/
 │   ├── folder_incrementer.js       # Frontend: FolderIncrementer
+│   ├── image_comparer.js           # Frontend: before/after comparison widget
 │   ├── points_bbox_editor.js       # Frontend: interactive canvas editor
 │   ├── parameter_memory.js         # Frontend: parameter history UI
 │   ├── sam_multi_mask_picker.js    # Frontend: 3-mask thumbnail picker
+│   ├── spline_mask_editor.js       # Frontend: spline drawing canvas (normalized coords)
 │   └── universal_reroute.js        # Frontend: Nuke-style dot
 ├── nodes/
 │   ├── sam_model_loader.py         # SAM/SAM2/SAM3 model loader
@@ -1034,7 +1152,7 @@ ComfyUI-CustomNodePacks/
 │   ├── sam_vitmatte_pipeline.py    # SAM → ViTMatte end-to-end pipeline
 │   ├── sec_matanyone_pipeline.py   # SeC → MatAnyone2 video pipeline
 │   ├── unified_segmentation_node.py# Unified segmentation dispatcher
-│   ├── unified_segmentation.py     # Segmentation backends
+│   ├── unified_segmentation.py     # Segmentation backends (deprecated)
 │   ├── semantic_segment.py         # SegFormer face/clothes parsing
 │   ├── background_remover.py       # RMBG / BiRefNet background removal
 │   ├── matting_node.py             # 7-backend alpha matting
@@ -1042,7 +1160,7 @@ ComfyUI-CustomNodePacks/
 │   ├── trimap_generator.py         # Trimap generation
 │   ├── luminance_keyer.py          # BT.709 luminance keyer
 │   ├── mask_transform_xy.py        # Per-axis mask transform
-│   ├── mask_draw_frame.py          # Shape drawing on masks
+│   ├── mask_draw_frame.py          # Shape drawing (12 shapes + DrawShapeMEC unified node)
 │   ├── mask_composite.py           # Mask compositing ops
 │   ├── mask_math.py                # Mathematical mask ops
 │   ├── mask_batch_manager.py       # Batch manipulation
@@ -1051,9 +1169,13 @@ ComfyUI-CustomNodePacks/
 │   ├── mask_failure_explainer.py   # Mask diagnostics engine
 │   ├── temporal_anchor.py          # SDF interpolation system
 │   ├── inpaint_suite.py            # Crop/stitch/paste-back/prepare (4 nodes)
-│   ├── bbox_nodes.py               # BBox tools (5 nodes)
-│   ├── points_mask_editor.py       # Interactive editor
+│   ├── bbox_nodes.py               # BBox tools (6 nodes incl. BBoxSmooth)
+│   ├── points_mask_editor.py       # Interactive point/bbox editor
+│   ├── spline_mask_editor.py       # Interactive spline mask drawing
+│   ├── motion_mask_tracker.py      # Per-frame motion detection (4 methods)
+│   ├── stabilization_utils.py      # Camera stabilization helpers
 │   ├── video_frame_extractor.py    # Frame extraction
+│   ├── image_comparer.py           # Before/after image comparison
 │   ├── universal_reroute.py        # Nuke-style reroute dot
 │   ├── parameter_memory.py         # Parameter history + SQLite
 │   ├── model_manager.py            # Shared model cache & download

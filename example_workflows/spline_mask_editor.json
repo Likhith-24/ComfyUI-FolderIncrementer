@@ -1,0 +1,118 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [50, 50],
+      "size": [320, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": [1], "slot_index": 0 },
+        { "name": "MASK", "type": "MASK", "links": null }
+      ],
+      "properties": { "Node name for S&R": "LoadImage" },
+      "widgets_values": ["example.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "SplineMaskEditorMEC",
+      "pos": [430, 50],
+      "size": [500, 600],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 1 }
+      ],
+      "outputs": [
+        { "name": "mask", "type": "MASK", "links": [2, 3], "slot_index": 0 },
+        { "name": "coords_json", "type": "STRING", "links": [4], "slot_index": 1 },
+        { "name": "spline_data_out", "type": "SPLINE_DATA", "links": null }
+      ],
+      "title": "Spline Mask Editor (MEC)",
+      "properties": { "Node name for S&R": "SplineMaskEditorMEC" },
+      "widgets_values": ["[]", "catmull_rom", true, true, 20, 2.0, false]
+    },
+    {
+      "id": 3,
+      "type": "MaskPreviewOverlay",
+      "pos": [1000, 50],
+      "size": [400, 400],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 5 },
+        { "name": "mask", "type": "MASK", "link": 2 }
+      ],
+      "outputs": [
+        { "name": "preview", "type": "IMAGE", "links": null }
+      ],
+      "title": "Preview Spline Mask",
+      "properties": { "Node name for S&R": "MaskPreviewOverlay" },
+      "widgets_values": ["overlay", 1.0, 0.3, 0.0, 0.4, 2, false, 0.0, 1.0, 0.0]
+    },
+    {
+      "id": 4,
+      "type": "SAMMaskGeneratorMEC",
+      "pos": [1000, 500],
+      "size": [350, 300],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": null },
+        { "name": "sam_model", "type": "SAM_MODEL", "link": null }
+      ],
+      "outputs": [
+        { "name": "masks", "type": "MASK", "links": null },
+        { "name": "best_score", "type": "FLOAT", "links": null },
+        { "name": "info", "type": "STRING", "links": null }
+      ],
+      "title": "SAM (from spline coords)",
+      "properties": { "Node name for S&R": "SAMMaskGeneratorMEC" },
+      "widgets_values": ["", "", true, 0, 1, 0]
+    },
+    {
+      "id": 5,
+      "type": "MaskMath",
+      "pos": [430, 700],
+      "size": [300, 200],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        { "name": "mask", "type": "MASK", "link": 3 }
+      ],
+      "outputs": [
+        { "name": "mask", "type": "MASK", "links": null }
+      ],
+      "title": "Invert Spline Mask",
+      "properties": { "Node name for S&R": "MaskMath" },
+      "widgets_values": ["invert", 0.0, 1.0]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "IMAGE"],
+    [2, 2, 0, 3, 1, "MASK"],
+    [3, 2, 0, 5, 0, "MASK"],
+    [4, 2, 1, 4, 0, "STRING"],
+    [5, 1, 0, 3, 0, "IMAGE"]
+  ],
+  "groups": [
+    {
+      "title": "Spline Mask Editor Workflow",
+      "bounding": [30, -20, 1420, 960],
+      "color": "#3f789e"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": { "scale": 0.8, "offset": [0, 0] }
+  },
+  "version": 0.4
+}

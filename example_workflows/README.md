@@ -40,18 +40,20 @@ These are sample ComfyUI workflows demonstrating the nodes in this pack. Drag an
 
 | Category | Nodes |
 |----------|-------|
-| **Editor** | Points Mask Editor |
-| **SAM** | SAM Model Loader, SAM Mask Generator |
-| **Pipeline** | SAM + ViTMatte Pipeline |
+| **Editor** | Points Mask Editor, Spline Mask Editor |
+| **SAM** | SAM Model Loader, SAM Mask Generator, SAM Multi-Mask Picker |
+| **Pipeline** | SAM + ViTMatte Pipeline, SeC + MatAnyone2 Pipeline |
 | **Refinement** | ViTMatte Edge Refiner, Trimap Generator |
 | **Transform** | Mask Transform XY |
-| **Draw** | Mask Draw Frame |
+| **Draw** | Mask Draw Frame, Draw Shape |
 | **Composite** | Mask Composite Advanced |
 | **Math** | Mask Math |
 | **Batch** | Mask Batch Manager |
-| **Preview** | Mask Preview Overlay |
-| **BBox** | BBox Create, BBox From Mask, BBox To Mask, BBox Pad, BBox Crop |
-| **Video** | Video Frame Extractor, Mask Propagate Video |
-| **Segmentation** | Unified Segmentation |
-| **Matting** | Matting Node |
-| **Utils** | Folder Version Incrementer, Folder Version Check, Folder Version Set |
+| **Preview** | Mask Preview Overlay, Image Comparer |
+| **BBox** | BBox Create, BBox From Mask, BBox To Mask, BBox Pad, BBox Crop, BBox Smooth Temporal |
+| **Video** | Video Frame Extractor, Mask Propagate Video, Motion Mask Tracker |
+| **Temporal** | Temporal Anchor System |
+| **Segmentation** | Unified Segmentation, Semantic Segment, Background Remover |
+| **Matting** | Matting Node, Luminance Keyer |
+| **Diagnostics** | Mask Failure Explainer |
+| **Utils** | Universal Reroute, Parameter History, Folder Version Incrementer, Folder Version Check, Folder Version Set |

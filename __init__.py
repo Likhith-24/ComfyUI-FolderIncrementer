@@ -52,7 +52,7 @@ from .nodes.inpaint_suite import InpaintCropProMEC, InpaintStitchProMEC, Inpaint
 from .nodes.image_comparer import ImageComparerMEC
 from .nodes.spline_mask_editor import SplineMaskEditorMEC
 from .nodes.motion_mask_tracker import MotionMaskTrackerMEC
-from .nodes.mask_draw_frame import DrawCircleMEC, DrawRectangleMEC, DrawEllipseMEC, DrawPolygonMEC, DrawLineMEC
+from .nodes.mask_draw_frame import DrawShapeMEC, DrawCircleMEC, DrawRectangleMEC, DrawEllipseMEC, DrawPolygonMEC, DrawLineMEC
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -93,6 +93,7 @@ _MEC_MAPPINGS = {
     "ImageComparerMEC": ImageComparerMEC,
     "SplineMaskEditorMEC": SplineMaskEditorMEC,
     "MotionMaskTrackerMEC": MotionMaskTrackerMEC,
+    "DrawShapeMEC": DrawShapeMEC,
     "DrawCircleMEC": DrawCircleMEC,
     "DrawRectangleMEC": DrawRectangleMEC,
     "DrawEllipseMEC": DrawEllipseMEC,
@@ -139,6 +140,7 @@ _MEC_DISPLAY = {
     "ImageComparerMEC": "Image Comparer (MEC)",
     "SplineMaskEditorMEC": "Spline Mask Editor (MEC)",
     "MotionMaskTrackerMEC": "Motion Mask Tracker (MEC)",
+    "DrawShapeMEC": "Draw Shape (MEC)",
     "DrawCircleMEC": "Draw Circle (MEC)",
     "DrawRectangleMEC": "Draw Rectangle (MEC)",
     "DrawEllipseMEC": "Draw Ellipse (MEC)",

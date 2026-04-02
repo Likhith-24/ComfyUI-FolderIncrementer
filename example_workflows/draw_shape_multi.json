@@ -1,0 +1,114 @@
+{
+  "last_node_id": 5,
+  "last_link_id": 5,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [50, 50],
+      "size": [320, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "links": [1], "slot_index": 0 },
+        { "name": "MASK", "type": "MASK", "links": null }
+      ],
+      "properties": { "Node name for S&R": "LoadImage" },
+      "widgets_values": ["example.png", "image"]
+    },
+    {
+      "id": 2,
+      "type": "DrawShapeMEC",
+      "pos": [430, 50],
+      "size": [350, 400],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 1 }
+      ],
+      "outputs": [
+        { "name": "MASK", "type": "MASK", "links": [2, 3], "slot_index": 0 }
+      ],
+      "title": "Draw Shape (MEC)",
+      "properties": { "Node name for S&R": "DrawShapeMEC" },
+      "widgets_values": ["rectangle", 512, 512, 256, 256, 200, 200, 0, 1.0, 0, 0, "nearest", 3, 0, 0, 0, 0, 0, 0, 0, false, 0.0]
+    },
+    {
+      "id": 3,
+      "type": "MaskPreviewOverlay",
+      "pos": [850, 50],
+      "size": [400, 400],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 4 },
+        { "name": "mask", "type": "MASK", "link": 2 }
+      ],
+      "outputs": [
+        { "name": "preview", "type": "IMAGE", "links": null }
+      ],
+      "title": "Preview Shape Mask",
+      "properties": { "Node name for S&R": "MaskPreviewOverlay" },
+      "widgets_values": ["overlay", 1.0, 0.3, 0.0, 0.4, 2, false, 0.0, 1.0, 0.0]
+    },
+    {
+      "id": 4,
+      "type": "MaskCompositeAdvanced",
+      "pos": [850, 500],
+      "size": [350, 200],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "mask_a", "type": "MASK", "link": 3 },
+        { "name": "mask_b", "type": "MASK", "link": 5 }
+      ],
+      "outputs": [
+        { "name": "MASK", "type": "MASK", "links": null }
+      ],
+      "title": "Combine Shapes",
+      "properties": { "Node name for S&R": "MaskCompositeAdvanced" },
+      "widgets_values": ["add", false, 1.0]
+    },
+    {
+      "id": 5,
+      "type": "DrawShapeMEC",
+      "pos": [430, 500],
+      "size": [350, 400],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": null }
+      ],
+      "outputs": [
+        { "name": "MASK", "type": "MASK", "links": [5], "slot_index": 0 }
+      ],
+      "title": "Draw Shape 2 (MEC)",
+      "properties": { "Node name for S&R": "DrawShapeMEC" },
+      "widgets_values": ["ellipse", 512, 512, 256, 256, 150, 100, 0, 1.0, 0, 0, "nearest", 3, 0, 0, 0, 0, 0, 0, 0, false, 0.0]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "IMAGE"],
+    [2, 2, 0, 3, 1, "MASK"],
+    [3, 2, 0, 4, 0, "MASK"],
+    [4, 1, 0, 3, 0, "IMAGE"],
+    [5, 5, 0, 4, 1, "MASK"]
+  ],
+  "groups": [
+    {
+      "title": "Draw Shape Multi-Mask Workflow",
+      "bounding": [30, -20, 1220, 960],
+      "color": "#3f789e"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": { "scale": 0.8, "offset": [0, 0] }
+  },
+  "version": 0.4
+}

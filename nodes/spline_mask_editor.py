@@ -314,8 +314,8 @@ def _rasterize_splines(spline_data_json: str, H: int, W: int,
         if len(raw_pts) < 2:
             continue
 
-        pts = [(float(p.get("x", p[0]) if isinstance(p, dict) else p[0]),
-                float(p.get("y", p[1]) if isinstance(p, dict) else p[1]))
+        pts = [(float(p["x"] if isinstance(p, dict) else p[0]),
+                float(p["y"] if isinstance(p, dict) else p[1]))
                for p in raw_pts]
 
         shape_type = shape.get("type", spline_type)

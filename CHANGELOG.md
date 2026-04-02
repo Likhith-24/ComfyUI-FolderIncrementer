@@ -2,6 +2,51 @@
 
 All notable changes to ComfyUI-CustomNodePacks are documented here.
 
+## [1.7.0] – 2026-04-02
+
+### Added
+
+- **DrawShapeMEC** – unified 12-shape drawing node with a single dropdown.
+  All parameters exposed as named inputs with descriptive tooltips — no
+  more raw JSON editing. Replaces the 5 legacy per-shape wrapper nodes.
+- **SplineMaskEditorMEC (JS rewrite)** – complete rewrite of the spline
+  editor following Olm SplineMask patterns:
+  - Normalized [0,1] coordinates (resolution-independent)
+  - Segment insertion via Ctrl+click near curve
+  - Close path by clicking first point (highlighted orange)
+  - Right-click context menu (Delete, Open/Close, Smooth/Sharp)
+  - Zoom-relative point sizes and fonts
+  - Property-based persistence with backward-compatible deserialization
+  - Status bar with keyboard hints
+
+### Changed
+
+- **DrawCircleMEC, DrawRectangleMEC, DrawEllipseMEC, DrawPolygonMEC,
+  DrawLineMEC** – deprecated, now thin wrappers around DrawShapeMEC.
+  Kept for backward compatibility with existing workflows.
+- Node count updated: 38 → 47 (44 MEC + 3 FolderIncrementer).
+- README, docs, and project structure updated for all new nodes.
+
+## [1.6.0] – 2026-03-19
+
+### Added
+
+- **SplineMaskEditorMEC** – interactive spline mask drawing with
+  Catmull-Rom, Bezier, and polyline modes. Outputs mask, SAM-compatible
+  coords, and SPLINE_DATA for downstream chaining.
+- **MotionMaskTrackerMEC** – per-frame motion detection with 4 methods
+  (pixel diff, optical flow, background subtraction, histogram diff),
+  camera stabilization (homography/affine/translation), and post-processing.
+- **BBoxSmooth** – smooth bounding-box sequences across video frames
+  using moving-average or exponential smoothing.
+- **stabilization_utils.py** – shared camera stabilization helpers for
+  motion tracker and inpaint suite.
+
+### Changed
+
+- **InpaintSuite** – uses stabilization_utils for camera-stable cropping.
+- **BBoxNodes** – added BBoxSmooth to the 5 existing BBox nodes.
+
 ## [1.5.0] – 2025-07-17
 
 ### Added

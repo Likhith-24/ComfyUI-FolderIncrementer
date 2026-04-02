@@ -1,9 +1,9 @@
 # Mask Editing & Transform
 
-> **Category:** `MaskEditControl/Transform` · `MaskEditControl/Draw` · `MaskEditControl/Composite` · `MaskEditControl/Math` · `MaskEditControl/Batch`  
+> **Category:** `MaskEditControl/Transform` · `MaskEditControl/Draw` · `MaskEditControl/Spline` · `MaskEditControl/Composite` · `MaskEditControl/Math` · `MaskEditControl/Batch`  
 > **VRAM Tier:** 1 (pure tensor math — no models loaded)
 
-Six nodes for precise mask manipulation: per-axis transform, shape drawing, compositing, math operations, batch management, and visualization.
+Eight nodes for precise mask manipulation: per-axis transform, shape drawing (raw + unified), spline mask editor, compositing, math operations, batch management, and visualization.
 
 ---
 
@@ -261,3 +261,107 @@ Visualize masks overlaid on images with 5 display modes, customizable colors, ed
 | `preview` | IMAGE | The visualization image |
 
 Handles batch size mismatches automatically (repeats the shorter batch to match the longer one).
+
+---
+
+### 7. Draw Shape (MEC)
+
+Unified 12-shape drawing node with a single dropdown. All parameters are exposed as named inputs (no JSON editing). Irrelevant parameters are ignored per shape. Replaces the 5 legacy per-shape wrapper nodes.
+
+**File:** [`nodes/mask_draw_frame.py`](../nodes/mask_draw_frame.py)  
+**Category:** `MaskEditControl/Draw`
+
+#### Parameters
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `width` | INT | `512` | 1 – 16384 | Canvas width |
+| `height` | INT | `512` | 1 – 16384 | Canvas height |
+| `shape` | CHOICE | `circle` | 12 shapes | Shape to draw |
+| `cx` / `cy` | FLOAT | `256.0` | −16384 – 16384 | Center position (center-based shapes) |
+| `radius` | FLOAT | `50.0` | 0 – 8192 | Circle radius; triangle/heart size |
+| `size_w` / `size_h` | FLOAT | `200` / `100` | 0 – 16384 | Rectangle, rounded_rect, diamond, arrow |
+| `rx` / `ry` | FLOAT | `100` / `50` | 0 – 8192 | Ellipse X/Y radii |
+| `top_left_x` / `top_left_y` | FLOAT | `100` | −16384 – 16384 | Top-left or line start |
+| `x2` / `y2` | FLOAT | `400` | −16384 – 16384 | Line end position |
+| `thickness` | FLOAT | `5.0` | 0 – 500 | Line/cross thickness |
+| `outer_r` / `inner_r` | FLOAT | `100` / `40` | 0 – 8192 | Star outer/inner radii |
+| `num_points` | INT | `5` | 3 – 50 | Star/polygon point count |
+| `corner_radius` | FLOAT | `20.0` | 0 – 4096 | Rounded rectangle corners |
+| `cross_size` | FLOAT | `100.0` | 0 – 8192 | Cross arm length |
+| `arrow_length` / `head_length` / `head_width` | FLOAT | — | 0 – 16384 | Arrow dimensions |
+| `points_json` | STRING | — | multiline | Polygon vertices `[[x1,y1],...]` |
+| `value` | FLOAT | `1.0` | 0.0 – 1.0 | Fill intensity |
+| `feather` | FLOAT | `0.0` | 0.0 – 128.0 | Edge feathering |
+| `rotation` | FLOAT | `0.0` | −360 – 360 | Rotation degrees |
+| `operation` | CHOICE | `set` | `set` · `add` · `subtract` · `max` · `min` | Blend with existing mask |
+| `batch_size` | INT | `1` | 1 – 256 | Number of mask frames |
+
+**Optional:** `coords_json`, `existing_mask`, `reference_image`
+
+#### Shape → Parameter Reference
+
+| Shape | Uses |
+|-------|------|
+| `circle` | cx, cy, radius |
+| `rectangle` | top_left_x, top_left_y, size_w, size_h |
+| `ellipse` | cx, cy, rx, ry |
+| `polygon` | points_json, num_points |
+| `line` | top_left_x, top_left_y, x2, y2, thickness |
+| `triangle` | cx, cy, radius |
+| `star` | cx, cy, outer_r, inner_r, num_points |
+| `diamond` | cx, cy, size_w, size_h |
+| `cross` | cx, cy, cross_size, thickness |
+| `rounded_rectangle` | top_left_x, top_left_y, size_w, size_h, corner_radius |
+| `heart` | cx, cy, radius |
+| `arrow` | cx, cy, arrow_length, size_w, head_length, head_width |
+
+#### Output
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `mask` | MASK | Drawn shape mask |
+
+---
+
+### 8. Spline Mask Editor (MEC)
+
+Interactive canvas for drawing spline-based masks directly on your image. Three interpolation modes with normalized-coordinate persistence and segment insertion.
+
+**File:** [`nodes/spline_mask_editor.py`](../nodes/spline_mask_editor.py) + [`js/spline_mask_editor.js`](../js/spline_mask_editor.js)  
+**Category:** `MaskEditControl/Spline`
+
+#### Parameters
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `image` | IMAGE | — | — | Reference image shown in editor canvas |
+| `spline_data` | STRING | `"[]"` | multiline | Internal serialized state (do not edit manually) |
+| `spline_type` | CHOICE | `catmull_rom` | `catmull_rom` · `bezier` · `polyline` | Interpolation method |
+| `closed` | BOOLEAN | `true` | — | Close the spline loop (filled region) |
+| `smoothing` | BOOLEAN | `true` | — | Enable spline smoothing |
+| `samples_per_segment` | INT | `20` | 2 – 100 | Curve resolution per segment |
+| `feather_radius` | FLOAT | `0.0` | 0.0 – 64.0 | Gaussian blur on mask edge |
+| `invert` | BOOLEAN | `false` | — | Fill outside spline instead of inside |
+
+**Optional:** `width` / `height` (INT, override dimensions; 0 = match image)
+
+#### Editor Controls
+
+| Action | Effect |
+|--------|--------|
+| **Left click** | Add point (or close path by clicking first point) |
+| **Shift + click** | Delete point under cursor |
+| **Ctrl + click** | Insert point on nearest curve segment |
+| **Right-click** | Context menu (Delete, Open/Close, Smooth/Sharp) |
+| **S key** | Toggle smooth / sharp |
+| **Scroll** | Zoom |
+| **Middle drag** | Pan |
+
+#### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `mask` | MASK | Rasterized filled spline region (B, H, W) |
+| `coords_json` | STRING | SAM-compatible point coords from control points |
+| `spline_data_out` | SPLINE_DATA | Structured data for downstream nodes |

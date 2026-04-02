@@ -3,7 +3,7 @@
 > **Category:** `MaskEditControl/Video` · `MaskEditControl/Temporal` · `MaskEditControl/BBox`  
 > **VRAM Tier:** 1–2 (pure tensor math for BBox/video; optional SAM2 for propagation/temporal)
 
-Eight nodes for video frame handling, mask propagation across frames, temporal interpolation between anchor masks, and bounding box creation/manipulation.
+Ten nodes for video frame handling, mask propagation, temporal interpolation, motion detection, and bounding box manipulation.
 
 ---
 
@@ -261,3 +261,84 @@ Crop an image (and optionally a mask) to a bounding box region.
 | `cropped_image` | IMAGE | Cropped image |
 | `cropped_mask` | MASK | Cropped mask (empty if no mask input) |
 | `bbox` | BBOX | Pass-through of the input bbox |
+
+---
+
+### 9. BBox Smooth Temporal (MEC)
+
+Smooth bounding-box sequences across video frames using moving-average or exponential smoothing, eliminating jitter in tracked crops.
+
+**File:** [`nodes/bbox_nodes.py`](../nodes/bbox_nodes.py)  
+**Category:** `MaskEditControl/BBox`
+
+#### Parameters
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `bboxes` | BBOX | — | — | Batch of bounding boxes (one per frame) |
+| `method` | CHOICE | `moving_average` | `moving_average` · `exponential` | Smoothing method |
+| `window_size` | INT | `5` | 1 – 30 | Moving average window (frames) |
+| `alpha` | FLOAT | `0.3` | 0.0 – 1.0 | Exponential smoothing factor (lower = smoother) |
+
+#### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `bboxes` | BBOX | Smoothed bounding boxes |
+
+---
+
+### 10. Motion Mask Tracker (MEC)
+
+Per-frame motion detection mask generator with 4 independent methods and camera stabilization. Feed a video batch — get a binary mask highlighting what moved between consecutive frames.
+
+**File:** [`nodes/motion_mask_tracker.py`](../nodes/motion_mask_tracker.py)  
+**Category:** `MaskEditControl/Video`
+
+#### Detection Methods
+
+| Method | Requires | Description |
+|--------|----------|-------------|
+| `pixel_diff` | — | Absolute per-pixel brightness change between consecutive frames |
+| `optical_flow` | `opencv-python` (fallback: torch) | Dense optical flow magnitude (Farneback or phase correlation) |
+| `background_sub` | — | Static background model from first N frames, foreground = deviation |
+| `histogram_diff` | — | Per-region color histogram L2 distance on NxN grid |
+
+#### Parameters
+
+| Parameter | Type | Default | Range | Description |
+|-----------|------|---------|-------|-------------|
+| `images` | IMAGE | — | — | Video batch (B,H,W,C), minimum 2 frames |
+| `camera_compensation` | BOOLEAN | `true` | — | Subtract global camera motion before detection |
+| `stabilization_method` | CHOICE | `homography` | `homography` · `affine` · `translation` | Camera alignment method |
+| `detection_mode` | CHOICE | `combined` | `combined` · `pixel_diff` · `optical_flow` · `background_sub` · `histogram_diff` | Single method or combined |
+| `pixel_diff_enabled` | BOOLEAN | `true` | — | Enable pixel difference (combined mode) |
+| `pixel_diff_threshold` | FLOAT | `0.05` | 0.001 – 1.0 | Pixel intensity change threshold |
+| `flow_enabled` | BOOLEAN | `true` | — | Enable optical flow |
+| `flow_threshold` | FLOAT | `1.0` | 0.1 – 50.0 | Flow magnitude threshold (pixels/frame) |
+| `flow_algorithm` | CHOICE | `farneback` | `farneback` · `phase_correlation` | Flow estimation algorithm |
+| `bg_sub_enabled` | BOOLEAN | `false` | — | Enable background subtraction |
+| `bg_model_frames` | INT | `5` | 1 – 30 | BG model averaging frames |
+| `bg_sub_threshold` | FLOAT | `0.1` | 0.001 – 1.0 | BG model deviation threshold |
+| `hist_enabled` | BOOLEAN | `false` | — | Enable histogram difference |
+| `hist_grid_size` | INT | `16` | 4 – 64 | Grid cell count |
+| `hist_threshold` | FLOAT | `0.15` | 0.01 – 1.0 | Histogram distance threshold |
+| `combine_method` | CHOICE | `union` | `union` · `intersection` | How to merge enabled methods |
+| `grow_pixels` | FLOAT | `4.0` | 0.0 – 64.0 | Dilate detected regions |
+| `min_region_size` | INT | `100` | 0 – 10000 | Remove noise blobs < N pixels |
+| `temporal_smooth` | BOOLEAN | `true` | — | Gaussian smoothing across frames |
+
+#### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `motion_mask` | MASK | Per-frame binary motion mask (B, H, W) |
+| `motion_intensity` | FLOAT | Mean per-frame motion coverage (%) |
+| `info` | STRING | Detailed per-frame logging |
+
+#### Use Cases
+
+- **Selective VFX:** Apply effects only to moving regions
+- **Motion-triggered routing:** Use `motion_intensity` to switch between static/dynamic processing
+- **Video compositing:** Isolate moving subjects from static backgrounds
+- **Quality control:** Detect unexpected motion or camera shake

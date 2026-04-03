@@ -27,7 +27,10 @@ from __future__ import annotations
 import json
 import math
 import logging
+import io
+import base64
 from typing import List, Tuple, Optional
+from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
@@ -39,7 +42,17 @@ try:
 except ImportError:
     HAS_CV2 = False
 
+try:
+    from PIL import Image as PILImage
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 logger = logging.getLogger("MEC")
+
+# Preview cache: node_id → {image tensor, rendering params}
+_preview_cache: OrderedDict = OrderedDict()
+_MAX_PREVIEW_CACHE = 10
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -445,6 +458,68 @@ def _build_spline_data(spline_data_json: str, canvas_w: int, canvas_h: int) -> d
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Preview rendering (server-side preview for JS frontend)
+# ══════════════════════════════════════════════════════════════════════
+
+def _tensor_to_pil(tensor: torch.Tensor):
+    """Convert (B,H,W,C) or (H,W,C) IMAGE tensor to PIL Image."""
+    if not HAS_PIL:
+        return None
+    t = tensor[0] if tensor.dim() == 4 else tensor
+    arr = (t.detach().cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    return PILImage.fromarray(arr)
+
+
+def _render_preview_b64(image_tensor: torch.Tensor, spline_data_str: str,
+                        mask_color: str, mask_opacity: float,
+                        spline_type: str, closed: bool, smoothing: bool,
+                        samples_per_segment: int, feather_radius: float,
+                        invert: bool) -> str:
+    """Render preview: input image + colored mask overlay → base64 PNG."""
+    if not HAS_PIL:
+        return ""
+    img = _tensor_to_pil(image_tensor)
+    if img is None:
+        return ""
+    W, H = img.size
+
+    # Generate mask on CPU
+    actual_samples = samples_per_segment if smoothing else 1
+    mask_t = _rasterize_splines(
+        spline_data_json=spline_data_str, H=H, W=W,
+        spline_type=spline_type, closed=closed,
+        samples_per_segment=actual_samples,
+        feather_radius=feather_radius, invert=invert,
+        device=torch.device("cpu"),
+    )  # (1, H, W)
+    mask_np = (mask_t[0].cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+
+    # Parse mask color
+    r, g, b = 255, 0, 255  # default magenta
+    if mask_color and len(mask_color) >= 7:
+        try:
+            r = int(mask_color[1:3], 16)
+            g = int(mask_color[3:5], 16)
+            b = int(mask_color[5:7], 16)
+        except ValueError:
+            pass
+
+    alpha_val = int(max(0.0, min(1.0, mask_opacity)) * 255)
+
+    # Composite: image + colored mask overlay
+    base = img.convert("RGBA")
+    mask_pil = PILImage.fromarray(mask_np, mode="L")
+    color_layer = PILImage.new("RGBA", (W, H), (r, g, b, alpha_val))
+    overlay = PILImage.new("RGBA", (W, H), (0, 0, 0, 0))
+    overlay.paste(color_layer, mask=mask_pil)
+    result = PILImage.alpha_composite(base, overlay)
+
+    buf = io.BytesIO()
+    result.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  NODE: SplineMaskEditorMEC
 # ══════════════════════════════════════════════════════════════════════
 
@@ -510,6 +585,17 @@ class SplineMaskEditorMEC:
                     "default": 0, "min": 0, "max": 16384, "step": 1,
                     "tooltip": "Output height. 0 = match image height.",
                 }),
+                "mask_color": ("STRING", {
+                    "default": "#ff00ff",
+                    "tooltip": "Hex color for mask overlay in the editor preview.",
+                }),
+                "mask_opacity": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Opacity of the mask overlay in the editor preview.",
+                }),
+            },
+            "hidden": {
+                "node_id": "UNIQUE_ID",
             },
         }
 
@@ -527,7 +613,9 @@ class SplineMaskEditorMEC:
                 spline_type: str, closed: bool, smoothing: bool,
                 samples_per_segment: int, feather_radius: float,
                 invert: bool,
-                width: int = 0, height: int = 0) -> tuple:
+                width: int = 0, height: int = 0,
+                mask_color: str = "#ff00ff", mask_opacity: float = 0.4,
+                node_id=None) -> tuple:
 
         B, img_H, img_W, C = image.shape
         device = image.device
@@ -578,4 +666,75 @@ class SplineMaskEditorMEC:
         )
         logger.info(info_msg)
 
-        return (mask, coords_json, spline_data_out)
+        # Cache image + params for live preview API
+        cache_key = str(node_id) if node_id else str(id(self))
+        _preview_cache[cache_key] = {
+            "image": image.detach().cpu(),
+            "mask_color": mask_color,
+            "mask_opacity": mask_opacity,
+            "spline_type": spline_type,
+            "closed": closed,
+            "smoothing": smoothing,
+            "samples_per_segment": samples_per_segment,
+            "feather_radius": feather_radius,
+            "invert": invert,
+        }
+        while len(_preview_cache) > _MAX_PREVIEW_CACHE:
+            _preview_cache.popitem(last=False)
+
+        # Render initial preview
+        preview_b64 = _render_preview_b64(
+            image, spline_data, mask_color, mask_opacity,
+            spline_type, closed, smoothing, samples_per_segment,
+            feather_radius, invert,
+        )
+
+        return {
+            "ui": {"cache_key": [cache_key], "preview": [preview_b64]},
+            "result": (mask, coords_json, spline_data_out),
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Server route: live preview updates
+# ══════════════════════════════════════════════════════════════════════
+try:
+    from server import PromptServer
+    from aiohttp import web
+
+    @PromptServer.instance.routes.post("/mec/api/splinemask/preview")
+    async def _mec_spline_preview(request):
+        """Re-render mask preview with updated spline data from JS editor."""
+        try:
+            data = await request.json()
+            node_id = str(data.get("node_id", ""))
+            spline_data = data.get("spline_data", "[]")
+
+            entry = _preview_cache.get(node_id)
+            if not entry:
+                return web.json_response({"status": "error", "message": "No cached image. Run the graph first."})
+
+            b64 = _render_preview_b64(
+                image_tensor=entry["image"],
+                spline_data_str=spline_data,
+                mask_color=entry.get("mask_color", "#ff00ff"),
+                mask_opacity=entry.get("mask_opacity", 0.4),
+                spline_type=entry.get("spline_type", "catmull_rom"),
+                closed=entry.get("closed", True),
+                smoothing=entry.get("smoothing", True),
+                samples_per_segment=entry.get("samples_per_segment", 20),
+                feather_radius=entry.get("feather_radius", 0.0),
+                invert=entry.get("invert", False),
+            )
+
+            if not b64:
+                return web.json_response({"status": "error", "message": "PIL not available"})
+
+            return web.json_response({"status": "ok", "image": b64})
+        except Exception as e:
+            logger.error(f"[MEC] Spline preview error: {e}")
+            return web.json_response({"status": "error", "message": str(e)})
+
+    logger.info("[MEC] SplineMaskEditor preview route registered.")
+except Exception:
+    pass  # Server not available (testing)

@@ -170,10 +170,10 @@ class SplineEditor {
         // Undo
         this._undoStack = [];
 
-        // Reference image
-        this._refImage = null;
-        this._refLoaded = false;
-        this._lastRefUrl = null;
+        // Server preview image
+        this._previewImage = null;
+        this._previewLoaded = false;
+        this._cacheKey = null;
 
         // Toolbar
         this._toolbarButtons = [];
@@ -439,23 +439,20 @@ class SplineEditor {
         return catmullRomSample(path.points, path.closed, 12);
     }
 
-    // ── Reference image ──────────────────────────────────────────────
-    _updateRefImage() {
-        const imgWidget = this.node.widgets?.find(w => w.name === "reference_image_url");
-        const url = imgWidget?.value;
-        if (!url || url === this._lastRefUrl) return;
-        this._lastRefUrl = url;
-        this._refLoaded = false;
+    // ── Server preview image ─────────────────────────────────────────
+    setPreviewImage(dataUrl) {
+        if (!dataUrl) return;
         const img = new Image();
         img.onload = () => {
-            this._refImage = img;
-            this._refLoaded = true;
+            this._previewImage = img;
+            this._previewLoaded = true;
             this._canvasW = img.naturalWidth;
             this._canvasH = img.naturalHeight;
+            this._hasAutoFitted = false; // re-fit to new image size
             this.node.setDirtyCanvas(true);
         };
-        img.onerror = () => { this._refLoaded = false; };
-        img.src = url;
+        img.onerror = () => { this._previewLoaded = false; };
+        img.src = dataUrl;
     }
 
     // ── Auto-fit preview bounds ──────────────────────────────────────
@@ -579,7 +576,6 @@ class SplineEditor {
 
     // ── Main draw ────────────────────────────────────────────────────
     draw(ctx, widgetX, widgetY, widgetW, widgetH) {
-        this._updateRefImage();
         if (!this._hasAutoFitted) {
             this.autoFit(widgetW, widgetH);
             this._hasAutoFitted = true;
@@ -634,11 +630,16 @@ class SplineEditor {
             ctx.beginPath(); ctx.moveTo(ox + bx, oy + by + gy); ctx.lineTo(ox + bx + bw, oy + by + gy); ctx.stroke();
         }
 
-        // Reference image
-        if (this._refImage && this._refLoaded) {
-            ctx.globalAlpha = 0.5;
-            ctx.drawImage(this._refImage, ox + bx, oy + by, bw, bh);
-            ctx.globalAlpha = 1.0;
+        // Server preview image (full fidelity: image + mask overlay)
+        if (this._previewImage && this._previewLoaded) {
+            ctx.drawImage(this._previewImage, ox + bx, oy + by, bw, bh);
+        } else {
+            // No preview yet — show hint
+            ctx.fillStyle = "#ffffff44";
+            ctx.font = "13px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("Run graph to see preview", ox + bx + bw / 2, oy + by + bh / 2);
         }
 
         // Canvas border
@@ -928,13 +929,61 @@ app.registerExtension({
 
         const editor = new SplineEditor(node);
 
-        // Hide spline_data widget
-        const dataWidget = node.widgets?.find(w => w.name === "spline_data");
-        if (dataWidget) {
-            dataWidget.type = "hidden";
-            dataWidget.computeSize = () => [0, -4];
-            dataWidget.draw = () => {};
+        // Hide internal widgets
+        for (const wName of ["spline_data", "mask_color", "mask_opacity"]) {
+            const w = node.widgets?.find(w => w.name === wName);
+            if (w) {
+                w.type = "hidden";
+                w.computeSize = () => [0, -4];
+                w.draw = () => {};
+            }
         }
+
+        // ── Debounced preview update from server ─────────────────────
+        let _previewTimeout = null;
+        function requestPreviewUpdate() {
+            if (!editor._cacheKey) return;
+            clearTimeout(_previewTimeout);
+            _previewTimeout = setTimeout(async () => {
+                try {
+                    const splineWidget = node.widgets?.find(w => w.name === "spline_data");
+                    const splineData = splineWidget?.value || "[]";
+                    const resp = await fetch("/mec/api/splinemask/preview", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            node_id: editor._cacheKey,
+                            spline_data: splineData,
+                        }),
+                    });
+                    const result = await resp.json();
+                    if (result.status === "ok" && result.image) {
+                        editor.setPreviewImage(result.image);
+                    }
+                } catch (e) {
+                    // Silently fail — preview is non-critical
+                }
+            }, 150);
+        }
+
+        // Hook _serialize to trigger preview updates
+        const origSerialize = editor._serialize.bind(editor);
+        editor._serialize = function () {
+            origSerialize();
+            requestPreviewUpdate();
+        };
+
+        // ── Capture preview from execution results ───────────────────
+        const origOnExecuted = node.onExecuted;
+        node.onExecuted = function (message) {
+            origOnExecuted?.apply(this, arguments);
+            if (message?.cache_key?.[0]) {
+                editor._cacheKey = message.cache_key[0];
+            }
+            if (message?.preview?.[0]) {
+                editor.setPreviewImage(message.preview[0]);
+            }
+        };
 
         // Interactive editor widget
         const widget = node.addCustomWidget({

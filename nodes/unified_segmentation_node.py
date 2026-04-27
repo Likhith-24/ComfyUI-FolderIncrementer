@@ -347,6 +347,17 @@ class UnifiedSegmentationNode:
                         "When True, each point gets its own object ID and masks are OR-combined."
                     ),
                 }),
+                "force_mode": (["auto", "image", "video"], {
+                    "default": "auto",
+                    "tooltip": (
+                        "Override automatic image/video routing.\n"
+                        "auto:  B>1 → video, B==1 → image (default).\n"
+                        "image: process every frame independently — useful for "
+                        "non-temporal batches like contact sheets or A/B renders.\n"
+                        "video: force video propagation even when B==1 — useful "
+                        "when re-running a single frame through video infrastructure."
+                    ),
+                }),
             },
         }
 
@@ -388,6 +399,7 @@ class UnifiedSegmentationNode:
         tracking_direction: str = "forward",
         annotation_frame_idx: int = 0,
         individual_objects: bool = False,
+        force_mode: str = "auto",
     ):
         clean = model_name.replace("[download] ", "")
         if clean not in MODEL_REGISTRY:
@@ -430,7 +442,13 @@ class UnifiedSegmentationNode:
             neg_box = parse_bbox_input("", neg_bboxes)
 
         B, H, W, _C = image.shape
-        is_video = B > 1
+        # Routing: honor force_mode override if user pinned image/video.
+        if force_mode == "video":
+            is_video = True
+        elif force_mode == "image":
+            is_video = False
+        else:
+            is_video = B > 1
         torch_dtype = precision_to_dtype(precision)
         annotation_frame_idx = min(annotation_frame_idx, max(0, B - 1))
 

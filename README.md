@@ -5,9 +5,10 @@
 <h1 align="center">ComfyUI-CustomNodePacks</h1>
 
 <p align="center">
-  <strong>MaskEditControl (MEC) + FolderIncrementer</strong><br/>
+  <strong>MaskEditControl (MEC) + FolderIncrementer + VFX Suite</strong><br/>
   Production-grade mask editing, SAM1/2/3 segmentation, alpha matting, inpainting, diagnostics,<br/>
-  temporal mask interpolation, luminance keying, and auto-versioned file output for ComfyUI.
+  temporal mask interpolation, luminance keying, color science, EXR I/O, render-pass<br/>
+  compositing, plate tools, VAE merging &amp; analysis, and auto-versioned file output for ComfyUI.
 </p>
 
 <p align="center">
@@ -23,12 +24,15 @@
 
 ## Overview
 
-**ComfyUI-CustomNodePacks** ships **38 nodes** organized into four packs:
+**ComfyUI-CustomNodePacks** ships **72 nodes** organized into the following packs:
 
 | Pack | Nodes | Purpose |
 |------|------:|---------|
 | **MaskEditControl (MEC)** | 33 | Pinpoint mask editing, SAM1/2/3 segmentation, SAM multi-mask picker, SeC + MatAnyone2 pipeline, background removal, face/clothes parsing, ViTMatte alpha matting, luminance keying, inpaint crop/stitch/paste-back suite, image comparison, mask failure diagnostics, temporal anchor interpolation, video propagation, compositing tools |
-| **FolderIncrementer** | 3 | Filesystem-safe auto-versioned output (`v001`, `v002`, …) |
+| **VAE Tools** | 4 | Merge two/three VAEs (8 algorithms, per-block alpha), latent inspector, similarity analyser, per-block weight inspector |
+| **VFX Suite** | 19 | Color-space convert (sRGB/linear/Rec.709/ACEScg), `.cube` LUT apply, exposure/grade, EXR load+save, merge render passes, depth-of-field mask, depth warp, normal→curvature, position-pass splitter, grain match, plate stabilizer, clean-plate extractor, difference matte, metadata writer, frame-range router, shot-metadata reader |
+| **Diagnostics** | 5 | EXR metadata reader, batch version manager, temporal consistency checker, model metadata extractor, parameter history |
+| **FolderIncrementer** | 3 | Filesystem-safe auto-versioned output (`v001`, `v002`, …) with name sanitization and atomic version reservation |
 | **Universal Reroute** | 1 | Nuke-style Dot node — reroute any wire type for cleaner workflow graphs |
 | **Parameter Memory** | 1 | Tracks every parameter change with SQLite history, defaults recall, and per-run diffing |
 
@@ -128,6 +132,11 @@ Every node's parameters, modes, and outputs are documented in depth in the `docs
 | [Matting & Refinement](docs/matting-refinement.md) | 4 | Matting Node (7 backends), ViTMatte Refiner (7 methods), Trimap Generator, Luminance Keyer |
 | [Video, Temporal & BBox](docs/video-temporal-bbox.md) | 10 | Frame Extractor, Mask Propagate (5 modes), Temporal Anchor (SDF), Motion Mask Tracker (4 methods), 6 BBox nodes |
 | [Utility & Interactive](docs/utility-nodes.md) | 8 | Points Mask Editor, Image Comparer, Mask Failure Explainer, Parameter History, Universal Reroute, 3 Folder Incrementer nodes |
+| [VAE Tools](docs/vae-merge.md) | 4 | VAE Merge (8 algorithms), Latent Inspector, Similarity Analyser, Block Inspector |
+| [Color Science](docs/color-science.md) | 3 | sRGB/linear/Rec.709/ACEScg convert, `.cube` LUT apply, exposure/WB/contrast grade |
+| [EXR I/O](docs/exr-io.md) | 2 | Load and save OpenEXR with imageio + TIFF fallback chain |
+| [Render Passes](docs/render-pass.md) | 2 | Merge beauty + AO/diffuse/spec/emission, depth→CoC mask |
+| [Plate Tools](docs/plate-tools.md) | 4 | Grain match, plate stabilizer (ORB/FFT), clean-plate extractor, difference matte |
 
 ---
 
@@ -928,6 +937,31 @@ All 47 nodes at a glance:
 | 41 | Folder Version Check | Output | 1 | Check existing versions |
 | 42 | Folder Version Set | Output | 1 | Reserve version slots |
 | 43–47 | Draw Circle / Rectangle / Ellipse / Polygon / Line | Editing | 1 | *(Deprecated)* Legacy per-shape wrappers — use Draw Shape instead |
+| 48 | VAE Merge | VAE | 1 | Merge 2/3 VAEs (8 algorithms, per-block alpha) |
+| 49 | VAE Latent Inspector | VAE | 1 | Per-channel stats, NaN/Inf checks, health verdict |
+| 50 | VAE Similarity Analyser | VAE | 1 | Cosine similarity (global + per-block) between two VAEs |
+| 51 | VAE Block Inspector | VAE | 1 | Per-block weight stats for a single VAE |
+| 52 | Color Space Convert | Color | 1 | sRGB ↔ linear ↔ Rec.709 ↔ ACEScg |
+| 53 | LUT Apply (.cube) | Color | 1 | Adobe `.cube` 1D/3D LUT with strength blend |
+| 54 | Exposure Grade | Color | 1 | Stops + WB temp/tint + contrast pivot |
+| 55 | Load EXR | I/O | 1 | OpenEXR → imageio → TIFF fallback |
+| 56 | Save EXR | I/O | 1 | Half-float by default, TIFF fallback |
+| 57 | EXR Metadata Reader | I/O | 1 | Pure-python header parser (no OpenEXR needed) |
+| 58 | Merge Render Passes | Render | 1 | Beauty + diffuse/spec/emission/AO compositing |
+| 59 | Depth-of-Field Mask | Render | 1 | Depth pass → CoC alpha mask |
+| 60 | Depth Warp | Geometry | 1 | Horizontal parallax warp from depth |
+| 61 | Normal → Curvature | Geometry | 1 | Curvature mask from a tangent-space normal pass |
+| 62 | Position Pass Splitter | Geometry | 1 | Split position pass into X/Y/Z masks |
+| 63 | Grain Match | Plate | 1 | Extract grain from reference plate, re-apply to target |
+| 64 | Plate Stabilizer | Plate | 1 | ORB+RANSAC affine (cv2) → FFT translation fallback |
+| 65 | Clean Plate Extractor | Plate | 1 | Median across batch with optional mask exclusion |
+| 66 | Difference Matte | Plate | 1 | L1/L2 image diff → MASK with threshold + softness |
+| 67 | Metadata Writer | Metadata | 1 | Write/merge JSON sidecars next to outputs |
+| 68 | Frame Range Router | Metadata | 1 | Slice IMAGE/MASK batches `[start:end:step]` |
+| 69 | Shot Metadata Reader | Metadata | 1 | Read shot.json (show / shot / task / frame in/out / fps) |
+| 70 | Batch Version Manager | Output | 1 | `<root>/<show>/<shot>/<task>/v###/` with atomic reservation |
+| 71 | Temporal Consistency Checker | Diagnostics | 1 | Flicker score (mask_iou / pixel_diff / Farneback flow) |
+| 72 | Model Metadata Extractor | Diagnostics | 1 | Inspect safetensors/checkpoints **without unpickling** |
 
 **VRAM Tiers:** 1 = pure tensor math (CPU/GPU, no models), 2 = loads a model (~1–4 GB), 3 = loads multiple models
 

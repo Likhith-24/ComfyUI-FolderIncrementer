@@ -2,6 +2,94 @@
 
 All notable changes to ComfyUI-CustomNodePacks are documented here.
 
+## [1.8.0] – 2026-05-XX
+
+### Added
+
+#### VAE & latent diagnostics
+
+- **VAEMergeMEC** – merge two (or three) VAEs with 8 algorithms
+  (weighted_sum, add_difference, tensor_sum, triple_sum, slerp, dare_ties,
+  block_swap, clamp_interp). Per-block alpha overrides via JSON or
+  comma list, brightness/contrast post-tuning on `decoder.conv_out`,
+  CPU-side merge in float32, architecture detection (sd1x / sdxl / flux /
+  mochi). Returns the merged VAE plus a JSON info report.
+- **VAELatentInspectorMEC** – per-channel min/max/mean/std/abs_mean
+  statistics, NaN/Inf counts, and a `verdict` of corrupt / saturated /
+  low_contrast / healthy. Optional `fail_on_corrupt` to raise hard.
+- **VAESimilarityAnalyserMEC** – cosine similarity between two VAEs
+  globally and per block, with optional per-tensor breakdown.
+- **VAEBlockInspectorMEC** – per-block weight statistics for any VAE
+  (mean / std / abs_mean / count).
+
+#### Color science (`MaskEditControl/Color`)
+
+- **ColorSpaceConvertMEC** – sRGB ↔ Linear ↔ Rec.709 ↔ ACEScg via
+  built-in matrices and OETFs. No PyOpenColorIO required.
+- **LUTApplyMEC** – Adobe `.cube` LUT loader (1D and 3D) with trilinear
+  interpolation in pure torch and a strength blend.
+- **ExposureGradeMEC** – exposure (stops), white-balance (temp / tint),
+  and contrast around a configurable mid-grey pivot. Operates in linear
+  by default with sRGB encode/decode round-trip.
+
+#### EXR I/O & metadata (`MaskEditControl/IO` / `Metadata`)
+
+- **LoadEXRMEC**, **SaveEXRMEC** – EXR read/write with OpenEXR-first,
+  imageio-fallback, and final 16-bit TIFF fallback. Half-float by default.
+- **EXRMetadataReaderMEC** – pure-python EXR header parser when OpenEXR
+  isn't installed; surfaces width/height/channels/compression.
+- **MetadataWriterMEC** – write/merge JSON sidecars next to image batches.
+- **ShotMetadataNodeMEC** – read shot.json descriptor (show / shot / task /
+  frame_in / frame_out / fps).
+- **FrameRangeRouterMEC** – slice IMAGE/MASK batches by `[start:end:step]`
+  with negative-index support.
+- **BatchVersionManagerMEC** – `<root>/<show>/<shot>/<task>/v###/` layout
+  with safe sanitization and atomic version reservation via lockfile.
+
+#### Render passes & geometry (`MaskEditControl/Render` / `Geometry`)
+
+- **MergeRenderPassesMEC** – composite beauty + diffuse / specular /
+  emission / AO with independent gains.
+- **DepthOfFieldMaskMEC** – depth → CoC mask with focus_distance and
+  aperture controls; emits both CoC and in-focus masks.
+- **DepthWarpMEC** – horizontal parallax warp driven by a depth pass
+  (cheap stereo synthesis).
+- **NormalToCurvatureMEC** – curvature mask from a tangent-space normal
+  pass via central-difference divergence.
+- **PositionPassSplitterMEC** – split a world-position pass into per-axis
+  X / Y / Z masks (auto- or manually-ranged).
+
+#### Plate tools (`MaskEditControl/PlateTools`)
+
+- **GrainMatchMEC** – extract grain (reference − denoise(reference)) and
+  re-apply it to a target plate, with seeded per-frame sampling.
+- **PlateStabilizerMEC** – ORB+RANSAC affine stabilization (cv2) with
+  FFT-translation fallback when cv2 isn't available.
+- **CleanPlateExtractorMEC** – pixelwise median across a batch with
+  optional mask exclusion of foreground samples.
+- **DifferenceMatteMEC** – L1/L2 difference matte with threshold and
+  softness.
+
+#### Diagnostics
+
+- **TemporalConsistencyCheckerMEC** – flicker / instability score across
+  a video batch using mask_iou, pixel_diff, or Farneback flow_warp.
+- **ModelMetadataExtractorMEC** – inspect safetensors / checkpoint files
+  without ever unpickling. SHA256 fingerprint on size + first/last 1MB,
+  bounded `pickletools.dis` for legacy pickles.
+
+### Changed
+
+- **FolderIncrementerMEC** – added `folder_name_override` STRING and
+  `reserve_version` BOOLEAN. Names are sanitized against Windows reserved
+  names and illegal characters. Outputs use POSIX-style paths.
+- **SAMModelLoaderMEC** – added `original_device` tracking and module
+  helpers (`move_to_inference_device`, `restore_device`) for safe
+  CPU↔GPU shuffling on offload-enabled wrappers.
+- **MattingNodeMEC** – `auto_download` switch + four-step fallback chain:
+  vitmatte_base → vitmatte_small → cv2 guided filter → torch Gaussian.
+- **UnifiedSegmentationNode** – added `force_mode` (auto / image / video).
+
 ## [1.7.0] – 2026-04-02
 
 ### Added

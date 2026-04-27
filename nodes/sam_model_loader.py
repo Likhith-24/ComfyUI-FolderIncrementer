@@ -25,6 +25,69 @@ except ImportError:
     HAS_FOLDER_PATHS = False
 
 
+# ──────────────────────────────────────────────────────────────────────
+#  Device-juggling helpers for inference nodes
+# ──────────────────────────────────────────────────────────────────────
+#
+# SAM/SAM2 wrappers may have ``offload_to_cpu=True`` set, in which case
+# the ``model`` object lives on CPU between calls. Inference nodes
+# should call ``move_to_inference_device(wrapper)`` at entry and
+# ``restore_device(wrapper)`` in their ``finally`` block to avoid
+# device-mismatch errors when chaining multiple SAM inferences.
+#
+# Both helpers are no-ops when the wrapper is missing a device field
+# or when the underlying model has no ``.to()`` method (e.g. a raw
+# state dict). They never raise.
+
+def _model_to(obj, device):
+    """Best-effort .to(device); silently ignore objects that can't move."""
+    if obj is None:
+        return obj
+    try:
+        if hasattr(obj, "to"):
+            obj.to(device)
+        # Some SAM2 wrappers expose .model rather than being nn.Module
+        inner = getattr(obj, "model", None)
+        if inner is not None and hasattr(inner, "to") and inner is not obj:
+            inner.to(device)
+    except Exception as exc:
+        logger.warning("[MEC] SAM .to(%s) failed: %s", device, exc)
+    return obj
+
+
+def move_to_inference_device(sam_wrapper):
+    """Move a SAM wrapper's underlying model onto its inference device.
+
+    Returns the device string actually used. Safe to call repeatedly.
+    """
+    if not isinstance(sam_wrapper, dict):
+        return None
+    device = sam_wrapper.get("device") or ("cuda" if torch.cuda.is_available() else "cpu")
+    if sam_wrapper.get("offload_to_cpu"):
+        # When offload is enabled, the resting place is CPU; we still
+        # need to move it onto the inference device for the call.
+        target = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        target = device
+    _model_to(sam_wrapper.get("model"), target)
+    return target
+
+
+def restore_device(sam_wrapper):
+    """Move the SAM wrapper's model back to its resting device.
+
+    For ``offload_to_cpu=True`` wrappers, this returns the model to CPU.
+    Otherwise it's a no-op (the model never left ``original_device``).
+    Always followed by an empty_cache() to free VRAM.
+    """
+    if not isinstance(sam_wrapper, dict):
+        return
+    if sam_wrapper.get("offload_to_cpu"):
+        _model_to(sam_wrapper.get("model"), "cpu")
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 # ── Official SAM2 config mapping for build_sam2 ──────────────────────
 # Keys match filename stems; values are config paths for the official
 # sam2 package (pip install SAM-2).
@@ -250,6 +313,9 @@ class SAMModelLoaderMEC:
             "model": sam_model,
             "model_type": detected_type,
             "device": device,
+            "original_device": device,  # the device the model was loaded onto;
+                                          # callers should restore here in finally:
+                                          # see move_to_inference_device / restore_device.
             "offload_to_cpu": offload_to_cpu,
             "dtype": torch_dtype,
             "model_path": model_path,

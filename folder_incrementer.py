@@ -67,6 +67,36 @@ def _looks_like_input_file(filename: str) -> bool:
     return bool(_INPUT_FILE_PATTERNS.search(filename))
 
 
+# Characters illegal on Windows file systems (also covers Linux/macOS reserved
+# slash). NUL and other control chars are stripped too.
+_ILLEGAL_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_RESERVED_WINDOWS_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _sanitize_folder_name(name: str, max_length: int = 100, fallback: str = "output") -> str:
+    """Make *name* safe to use as a folder component on Windows/Linux/macOS.
+
+    Removes illegal characters, strips leading/trailing dots and whitespace,
+    rejects reserved Windows names (CON, PRN, ...) and clamps length.
+    Returns *fallback* if the result is empty.
+    """
+    if not name:
+        return fallback
+    cleaned = _ILLEGAL_FOLDER_CHARS.sub("_", str(name))
+    cleaned = cleaned.strip(" .")
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].rstrip(" .")
+    if not cleaned:
+        return fallback
+    if cleaned.upper() in _RESERVED_WINDOWS_NAMES:
+        cleaned = f"_{cleaned}"
+    return cleaned
+
+
 def _scan_next_version(scan_dir, prefix, padding):
     """
     Scan *scan_dir* for existing sub-directories that match the version
@@ -143,6 +173,14 @@ class FolderIncrementer:
                                "Drives folder name + output filename."}),
                 "base_path": ("STRING", {"default": "",
                     "tooltip": "Override base output directory.  Leave empty → ComfyUI output dir."}),
+                "folder_name_override": ("STRING", {"default": "",
+                    "tooltip": "Force a specific folder name instead of deriving from the input filename. "
+                               "Sanitized for cross-platform safety."}),
+                "reserve_version": ("BOOLEAN", {"default": False,
+                    "tooltip": "If True, create the version directory and write a `.reserved` marker file "
+                               "to claim the version number atomically. Prevents collisions in batch/render-farm "
+                               "workflows. Leave False for normal use (the directory will be created by "
+                               "ComfyUI's Save node when output is actually written)."}),
             },
         }
 
@@ -160,21 +198,30 @@ class FolderIncrementer:
 
     def increment(self, prefix="v", padding=3, label="default",
                   date_format="MM-DD-YYYY", path_style="auto",
-                  trigger=None, source_filename="", base_path=""):
+                  trigger=None, source_filename="", base_path="",
+                  folder_name_override="", reserve_version=False):
 
         sep = _get_path_sep(path_style)
         detected_os = _get_current_os()
 
         # ── 1. Derive names from source file ──────────────────────────
         if source_filename and source_filename.strip() and not _looks_like_input_file(source_filename.strip()):
-            basename = Path(source_filename.strip()).name
+            # Normalize Windows backslashes when running on POSIX (and vice-versa).
+            raw = source_filename.strip().replace("\\", "/")
+            basename = Path(raw).name
             name_no_ext = Path(basename).stem       # "SC_30_SHT50"
             ext = Path(basename).suffix             # ".mp4"
-            folder_name = name_no_ext
+            derived_folder = name_no_ext
         else:
             name_no_ext = ""
             ext = ""
-            folder_name = label
+            derived_folder = label
+
+        # Explicit override wins; otherwise sanitize the derived name.
+        if folder_name_override and folder_name_override.strip():
+            folder_name = _sanitize_folder_name(folder_name_override.strip(), fallback=label or "output")
+        else:
+            folder_name = _sanitize_folder_name(derived_folder, fallback=label or "output")
 
         # ── 2. Resolve base directory ─────────────────────────────────
         if base_path and base_path.strip():
@@ -192,12 +239,30 @@ class FolderIncrementer:
         version_num = _scan_next_version(date_dir, prefix, padding)
         version_string = f"{prefix}{str(version_num).zfill(padding)}"
 
-        # ── 5. Build output paths using chosen separator ──────────────
-        #    NOTE: We do NOT create the directory here.  ComfyUI's
-        #    get_save_image_path() calls os.makedirs(full_output_folder,
-        #    exist_ok=True) automatically when the downstream Save node
-        #    runs.  Creating it here would leave empty version folders
-        #    on every queue (because IS_CHANGED returns NaN).
+        # ── 5. Optional atomic reservation ────────────────────────────
+        #    Default behaviour: do NOT create the directory here.
+        #    ComfyUI's get_save_image_path() will create it when the
+        #    downstream Save node actually writes output. With
+        #    reserve_version=True, we claim the version slot up-front
+        #    by creating the directory and dropping a marker file —
+        #    safe for parallel batch / render-farm workflows.
+        if reserve_version:
+            try:
+                ver_dir = date_dir / version_string
+                ver_dir.mkdir(parents=True, exist_ok=True)
+                marker = ver_dir / ".reserved"
+                if not marker.exists():
+                    marker.write_text(
+                        f"reserved={datetime.now().isoformat()}\n"
+                        f"folder={folder_name}\n"
+                        f"version={version_string}\n",
+                        encoding="utf-8",
+                    )
+            except OSError as exc:
+                # Reservation is best-effort; never crash the workflow.
+                print(f"[MEC] FolderIncrementer: reserve_version failed: {exc}")
+
+        # ── 6. Build output paths using chosen separator ──────────────
         subfolder_path = sep.join([folder_name, today_date, version_string])
 
         if name_no_ext:
@@ -256,12 +321,13 @@ class FolderIncrementerReset:
         base_dir = Path(base_path.strip()) if base_path and base_path.strip() else Path(_get_output_dir())
         fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
         today_date = datetime.now().strftime(fmt)
-        scan_dir = base_dir / label / today_date
+        safe_label = _sanitize_folder_name(label, fallback="default")
+        scan_dir = base_dir / safe_label / today_date
         next_ver = _scan_next_version(scan_dir, "v", 3)
         current  = next_ver - 1
         if current < 1:
-            return (f"'{label}/{today_date}': no versions yet – next will be v001", 0)
-        return (f"'{label}/{today_date}': {current} version(s) exist – next will be v{str(next_ver).zfill(3)}", current)
+            return (f"'{safe_label}/{today_date}': no versions yet – next will be v001", 0)
+        return (f"'{safe_label}/{today_date}': {current} version(s) exist – next will be v{str(next_ver).zfill(3)}", current)
 
 
 class FolderIncrementerSet:
@@ -310,12 +376,13 @@ class FolderIncrementerSet:
         base_dir = Path(base_path.strip()) if base_path and base_path.strip() else Path(_get_output_dir())
         fmt = DATE_FORMAT_MAP.get(date_format, "%m-%d-%Y")
         today_date = datetime.now().strftime(fmt)
-        folder = base_dir / label / today_date
+        safe_label = _sanitize_folder_name(label, fallback="default")
+        folder = base_dir / safe_label / today_date
         for i in range(1, value + 1):
             ver_dir = folder / f"{prefix}{str(i).zfill(padding)}"
             ver_dir.mkdir(parents=True, exist_ok=True)
         next_ver = value + 1
-        return (f"Reserved v001–v{str(value).zfill(padding)} for '{label}/{today_date}'. "
+        return (f"Reserved v001–v{str(value).zfill(padding)} for '{safe_label}/{today_date}'. "
                 f"Next = v{str(next_ver).zfill(padding)}",
                 next_ver)
 

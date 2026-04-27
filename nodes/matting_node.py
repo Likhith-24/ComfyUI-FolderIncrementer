@@ -218,6 +218,16 @@ class MattingNode:
                 "sam_model": ("SAM_MODEL", {
                     "tooltip": "Required for sam_hq backend. SAM model from SAM Model Loader.",
                 }),
+                "auto_download": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": (
+                        "If True, allow ViTMatte / MatAnyone weights to be downloaded "
+                        "from HuggingFace on first use. If False and the model is not "
+                        "already cached, fall back immediately to guided_filter / "
+                        "gaussian_blur refinement instead of attempting a download. "
+                        "Useful for offline render farms."
+                    ),
+                }),
             },
         }
 
@@ -246,6 +256,7 @@ class MattingNode:
         trimap: torch.Tensor | None = None,
         n_warmup: int = 5,
         sam_model=None,
+        auto_download: bool = True,
     ):
         B_img = image.shape[0]
         if mask.dim() == 2:
@@ -289,18 +300,20 @@ class MattingNode:
 
         # Dispatch
         if actual_backend.startswith("vitmatte"):
-            alpha_mask = self._run_vitmatte(
+            alpha_mask = self._run_vitmatte_with_fallback(
                 image, mask, actual_backend, edge_radius, trimap, B, H, W,
+                auto_download=auto_download,
             )
         elif actual_backend == "matanyone2":
             try:
                 alpha_mask = self._run_matanyone(image, mask, n_warmup, B, H, W)
             except (ImportError, RuntimeError) as exc:
                 logger.warning(
-                    "[MEC] MatAnyone2 unavailable (%s), falling back to VitMatte.", exc,
+                    "[MEC] MatAnyone2 unavailable (%s), falling back to VitMatte chain.", exc,
                 )
-                alpha_mask = self._run_vitmatte(
+                alpha_mask = self._run_vitmatte_with_fallback(
                     image, mask, "vitmatte_small", edge_radius, trimap, B, H, W,
+                    auto_download=auto_download,
                 )
         elif actual_backend.startswith("rvm"):
             alpha_mask = self._run_rvm(image, actual_backend, n_warmup, B, H, W)
@@ -332,6 +345,123 @@ class MattingNode:
     # ══════════════════════════════════════════════════════════════════
     #  ViTMatte Backend
     # ══════════════════════════════════════════════════════════════════
+
+    # ══════════════════════════════════════════════════════════════════
+    #  ViTMatte Backend (with explicit fallback chain)
+    # ══════════════════════════════════════════════════════════════════
+    #
+    # Fallback order (any link can fail and we move on):
+    #   1. ViTMatte-base   (best quality, ~360 MB)
+    #   2. ViTMatte-small  (good quality, ~100 MB)
+    #   3. guided_filter   (CV2-based edge-aware refinement, no model)
+    #   4. gaussian_blur   (pure-torch soft-edge fallback, always available)
+
+    def _run_vitmatte_with_fallback(
+        self, image, mask, variant, edge_radius, trimap_in,
+        B, H, W, auto_download: bool = True,
+    ):
+        chain: list[str] = []
+        # Try the requested variant first, then escalate down the chain.
+        if variant == "vitmatte_base":
+            chain = ["vitmatte_base", "vitmatte_small"]
+        else:
+            chain = ["vitmatte_small", "vitmatte_base"]
+
+        # If auto_download is disabled, only try variants whose weights
+        # appear to be already cached. We cannot reliably introspect
+        # model_manager, so we simply attempt and catch network errors.
+        last_exc: Exception | None = None
+        for v in chain:
+            try:
+                if not auto_download:
+                    # Best-effort: set env so HF will refuse to download.
+                    import os as _os
+                    prev = _os.environ.get("HF_HUB_OFFLINE")
+                    _os.environ["HF_HUB_OFFLINE"] = "1"
+                    try:
+                        return self._run_vitmatte(
+                            image, mask, v, edge_radius, trimap_in, B, H, W,
+                        )
+                    finally:
+                        if prev is None:
+                            _os.environ.pop("HF_HUB_OFFLINE", None)
+                        else:
+                            _os.environ["HF_HUB_OFFLINE"] = prev
+                else:
+                    return self._run_vitmatte(
+                        image, mask, v, edge_radius, trimap_in, B, H, W,
+                    )
+            except Exception as exc:  # noqa: BLE001 - intentionally broad: network/import/runtime
+                logger.warning("[MEC] %s failed (%s); trying next backend.", v, exc)
+                last_exc = exc
+
+        # Both ViTMatte variants unavailable — try guided filter.
+        try:
+            return self._guided_filter_matte(image, mask, edge_radius, B, H, W)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[MEC] guided_filter unavailable (%s); using gaussian_blur fallback.", exc,
+            )
+
+        # Final fallback: pure-torch gaussian blur of the input mask.
+        logger.info(
+            "[MEC] Using gaussian_blur matte fallback. Last ViTMatte error: %s", last_exc,
+        )
+        return self._gaussian_blur_matte(mask, edge_radius, B, H, W)
+
+    def _guided_filter_matte(self, image, mask, edge_radius, B, H, W):
+        """Edge-aware mask refinement using OpenCV's guided filter.
+
+        Requires opencv-contrib (``cv2.ximgproc``). Falls back to
+        ``cv2.bilateralFilter`` if ximgproc is unavailable.
+        """
+        if not HAS_CV2:
+            raise RuntimeError("guided_filter requires OpenCV.")
+        import cv2
+        radius = max(2, edge_radius // 2)
+        out: list[torch.Tensor] = []
+        try:
+            ximgproc = cv2.ximgproc  # type: ignore[attr-defined]
+            has_gf = True
+        except AttributeError:
+            has_gf = False
+        for i in range(B):
+            img_np = image[min(i, image.shape[0] - 1)].cpu().numpy()
+            img_u8 = (img_np * 255).clip(0, 255).astype(np.uint8)
+            mask_np = mask[i].cpu().numpy().astype(np.float32)
+            if has_gf:
+                refined = ximgproc.guidedFilter(  # type: ignore[attr-defined]
+                    guide=img_u8, src=mask_np, radius=radius, eps=1e-3,
+                )
+            else:
+                # bilateralFilter on the mask using image as joint signal
+                refined = cv2.bilateralFilter(
+                    mask_np, d=radius * 2 + 1, sigmaColor=0.1, sigmaSpace=radius,
+                )
+            out.append(torch.from_numpy(np.clip(refined, 0.0, 1.0)).float())
+        return torch.stack(out)
+
+    def _gaussian_blur_matte(self, mask, edge_radius, B, H, W):
+        """Pure-torch soft-edge fallback. Always available.
+
+        Applies a single separable Gaussian blur sized to ``edge_radius``
+        and clamps to [0, 1]. Quality is far below ViTMatte but the
+        output is well-defined on every machine.
+        """
+        sigma = max(1.0, edge_radius / 3.0)
+        ksize = max(3, edge_radius * 2 + 1) | 1  # ensure odd
+        # Build 1D gaussian kernel
+        ax = torch.arange(ksize, dtype=torch.float32) - (ksize - 1) / 2.0
+        kern_1d = torch.exp(-(ax ** 2) / (2 * sigma * sigma))
+        kern_1d = kern_1d / kern_1d.sum()
+        # Separable conv via two passes
+        m = mask[:B].unsqueeze(1)  # [B, 1, H, W]
+        kern_h = kern_1d.view(1, 1, 1, ksize)
+        kern_v = kern_1d.view(1, 1, ksize, 1)
+        pad = ksize // 2
+        m = F.conv2d(F.pad(m, (pad, pad, 0, 0), mode="replicate"), kern_h)
+        m = F.conv2d(F.pad(m, (0, 0, pad, pad), mode="replicate"), kern_v)
+        return m.squeeze(1).clamp(0.0, 1.0)
 
     def _run_vitmatte(self, image, mask, variant, edge_radius, trimap_in, B, H, W):
         from PIL import Image as PILImage

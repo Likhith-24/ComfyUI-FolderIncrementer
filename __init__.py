@@ -53,6 +53,42 @@ from .nodes.image_comparer import ImageComparerMEC
 from .nodes.spline_mask_editor import SplineMaskEditorMEC
 from .nodes.motion_mask_tracker import MotionMaskTrackerMEC
 from .nodes.mask_draw_frame import DrawShapeMEC, DrawCircleMEC, DrawRectangleMEC, DrawEllipseMEC, DrawPolygonMEC, DrawLineMEC
+from .nodes.vae_merge import VAEMergeMEC
+from .nodes.vae_latent_inspector import VAELatentInspectorMEC
+from .nodes.exr_metadata_reader import EXRMetadataReaderMEC
+from .nodes.batch_version_manager import BatchVersionManagerMEC
+from .nodes.temporal_consistency_checker import TemporalConsistencyCheckerMEC
+from .nodes.model_metadata_extractor import ModelMetadataExtractorMEC
+
+# ── Phase 4: VFX suite ────────────────────────────────────────────────
+from .nodes.color_science import (
+    NODE_CLASS_MAPPINGS as _COLOR_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _COLOR_DISPLAY,
+)
+from .nodes.exr_io import (
+    NODE_CLASS_MAPPINGS as _EXRIO_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _EXRIO_DISPLAY,
+)
+from .nodes.render_pass import (
+    NODE_CLASS_MAPPINGS as _RP_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _RP_DISPLAY,
+)
+from .nodes.plate_tools import (
+    NODE_CLASS_MAPPINGS as _PT_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _PT_DISPLAY,
+)
+from .nodes.geometry_nodes import (
+    NODE_CLASS_MAPPINGS as _GEO_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _GEO_DISPLAY,
+)
+from .nodes.metadata_nodes import (
+    NODE_CLASS_MAPPINGS as _META_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _META_DISPLAY,
+)
+from .nodes.model_analysis import (
+    NODE_CLASS_MAPPINGS as _MA_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _MA_DISPLAY,
+)
 
 _MEC_MAPPINGS = {
     "MaskTransformXY": MaskTransformXY,
@@ -99,6 +135,12 @@ _MEC_MAPPINGS = {
     "DrawEllipseMEC": DrawEllipseMEC,
     "DrawPolygonMEC": DrawPolygonMEC,
     "DrawLineMEC": DrawLineMEC,
+    "VAEMergeMEC": VAEMergeMEC,
+    "VAELatentInspectorMEC": VAELatentInspectorMEC,
+    "EXRMetadataReaderMEC": EXRMetadataReaderMEC,
+    "BatchVersionManagerMEC": BatchVersionManagerMEC,
+    "TemporalConsistencyCheckerMEC": TemporalConsistencyCheckerMEC,
+    "ModelMetadataExtractorMEC": ModelMetadataExtractorMEC,
 }
 
 _MEC_DISPLAY = {
@@ -146,11 +188,27 @@ _MEC_DISPLAY = {
     "DrawEllipseMEC": "Draw Ellipse (MEC)",
     "DrawPolygonMEC": "Draw Polygon (MEC)",
     "DrawLineMEC": "Draw Line (MEC)",
+    "VAEMergeMEC": "VAE Merge (MEC)",
+    "VAELatentInspectorMEC": "VAE Latent Inspector (MEC)",
+    "EXRMetadataReaderMEC": "EXR Metadata Reader (MEC)",
+    "BatchVersionManagerMEC": "Batch Version Manager (MEC)",
+    "TemporalConsistencyCheckerMEC": "Temporal Consistency Checker (MEC)",
+    "ModelMetadataExtractorMEC": "Model Metadata Extractor (MEC)",
 }
 
 # ── Merge all mappings ────────────────────────────────────────────────
-NODE_CLASS_MAPPINGS = {**_FOLDER_MAPPINGS, **_MEC_MAPPINGS}
-NODE_DISPLAY_NAME_MAPPINGS = {**_FOLDER_DISPLAY, **_MEC_DISPLAY}
+NODE_CLASS_MAPPINGS = {
+    **_FOLDER_MAPPINGS,
+    **_MEC_MAPPINGS,
+    **_COLOR_MAPPINGS, **_EXRIO_MAPPINGS, **_RP_MAPPINGS,
+    **_PT_MAPPINGS, **_GEO_MAPPINGS, **_META_MAPPINGS, **_MA_MAPPINGS,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    **_FOLDER_DISPLAY,
+    **_MEC_DISPLAY,
+    **_COLOR_DISPLAY, **_EXRIO_DISPLAY, **_RP_DISPLAY,
+    **_PT_DISPLAY, **_GEO_DISPLAY, **_META_DISPLAY, **_MA_DISPLAY,
+}
 
 WEB_DIRECTORY = "./js"
 

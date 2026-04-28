@@ -60,6 +60,12 @@ from .nodes.batch_version_manager import BatchVersionManagerMEC
 from .nodes.temporal_consistency_checker import TemporalConsistencyCheckerMEC
 from .nodes.model_metadata_extractor import ModelMetadataExtractorMEC
 
+# ── MEC Paint Suite (Advanced Paint Canvas + Fixer + Refiner + Builder) ───
+from .nodes.mec_paint_suite import (
+    NODE_CLASS_MAPPINGS as _PAINT_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _PAINT_DISPLAY,
+)
+
 # ── Phase 4: VFX suite ────────────────────────────────────────────────
 from .nodes.color_science import (
     NODE_CLASS_MAPPINGS as _COLOR_MAPPINGS,
@@ -202,12 +208,14 @@ NODE_CLASS_MAPPINGS = {
     **_MEC_MAPPINGS,
     **_COLOR_MAPPINGS, **_EXRIO_MAPPINGS, **_RP_MAPPINGS,
     **_PT_MAPPINGS, **_GEO_MAPPINGS, **_META_MAPPINGS, **_MA_MAPPINGS,
+    **_PAINT_MAPPINGS,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **_FOLDER_DISPLAY,
     **_MEC_DISPLAY,
     **_COLOR_DISPLAY, **_EXRIO_DISPLAY, **_RP_DISPLAY,
     **_PT_DISPLAY, **_GEO_DISPLAY, **_META_DISPLAY, **_MA_DISPLAY,
+    **_PAINT_DISPLAY,
 }
 
 WEB_DIRECTORY = "./js"

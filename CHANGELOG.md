@@ -2,6 +2,34 @@
 
 All notable changes to ComfyUI-CustomNodePacks are documented here.
 
+## [1.9.0] – 2026-04-29
+
+### Added
+
+#### MEC Paint Suite (`MEC/Paint`)
+
+- **MECAdvancedPaintCanvas** – interactive paint canvas (DOM widget) with
+  Nuke-style procedural mask math: raw alpha → `mask_hardness` core threshold
+  → `mask_expansion` morphological dilate/erode → Gaussian
+  `mask_blur_radius` lerped against the hard mask by `mask_blur_strength`.
+  Outputs the alpha-composited painted image plus the processed mask.
+- **MECContextInpainter** – smart blend-back of an inpainted image. Per-channel
+  Reinhard colour match, CIE LAB lightness rescue when the inpainted region
+  is >5% darker, optional differential-diffusion preservation weight from
+  `|orig − inpaint|`, plus `[SEP]` / `[SKIP]` / `[ASC]` / `[DSC]` wildcard
+  parsing across connected mask regions.
+- **MECToneRefiner** – percentile-based black/white-point tone curve
+  (smoothstep), gray-world colour balance, optional bicubic upscale and
+  centre-focus fake DOF driven by `ai_dof_focus_depth`.
+- **MECBuilderSampler** – KSampler with adaptive CFG (`Constant` / `Linear` /
+  `Ease Down` via `set_model_sampler_cfg_function` keyed on per-step sigma)
+  and an optional 2-step self-correction polish pass at low denoise.
+- **`js/mec_advanced_paint.js`** – RGBA canvas widget with L-paint / R-erase,
+  linear-interpolated stamping (no dotted strokes on fast drags), brush
+  cursor mirroring size + hardness, mouse-wheel brush sizing, base64-PNG
+  serialisation into a hidden `canvas_data` widget so the Python node can
+  decode the user's drawing.
+
 ## [1.8.0] – 2026-04-29
 
 ### Fixed

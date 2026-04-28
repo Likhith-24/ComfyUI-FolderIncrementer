@@ -37,11 +37,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Install validation deps
+        run: pip install --upgrade pip tomli
+
       - name: Validate pyproject for Comfy
         shell: bash
         run: |
           python - <<'PY'
-          import tomllib
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
           d = tomllib.load(open("pyproject.toml", "rb"))
           p = d.get("project", {})
           assert p.get("name"), "[project].name required"

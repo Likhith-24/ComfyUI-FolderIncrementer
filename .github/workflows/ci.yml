@@ -45,7 +45,11 @@ jobs:
       - name: Validate pyproject.toml
         run: |
           python - <<'PY'
-          import tomllib, sys
+          try:
+              import tomllib
+          except ModuleNotFoundError:
+              import tomli as tomllib
+          import sys
           d = tomllib.load(open("pyproject.toml", "rb"))
           assert "project" in d, "missing [project]"
           p = d["project"]

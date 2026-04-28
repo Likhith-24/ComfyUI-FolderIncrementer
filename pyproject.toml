@@ -1,14 +1,28 @@
 [project]
 name = "comfyui-customnodepacks"
 description = "Custom node packs for ComfyUI: FolderIncrementer (auto-versioning) + MaskEditControl (pinpoint mask editing with SAM2/SAM3, per-axis erode/expand, point editor, bbox tools, video mask propagation)."
-version = "1.6.2"
+version = "1.7.0"
 license = { file = "MIT-License" }
 requires-python = ">=3.10"
+readme = "README.md"
+authors = [{ name = "Likhith-24" }]
+dependencies = [
+    "torch>=2.0",
+    "torchvision",
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "pillow>=10.0",
+    "transformers>=4.40",
+    "diffusers>=0.27",
+    "accelerate",
+    "matplotlib",
+]
 
 [project.urls]
 Repository = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks"
+Issues = "https://github.com/Likhith-24/ComfyUI-CustomNodePacks/issues"
 
 [tool.comfy]
-PublisherId = "likhith-24" # TODO (fill in Publisher ID from Comfy Registry Website).
-DisplayName = "ComfyUI-CustomNodePacks" # Display name for the Custom Node. Can be changed later.
-Icon = "https://i.pinimg.com/736x/5d/52/19/5d5219ef27c1530bea027ff95d352e05.jpg" # SVG, PNG, JPG or GIF (MAX. 800x400px)
+PublisherId = "likhith-24"
+DisplayName = "ComfyUI-CustomNodePacks"
+Icon = "https://i.pinimg.com/736x/5d/52/19/5d5219ef27c1530bea027ff95d352e05.jpg"

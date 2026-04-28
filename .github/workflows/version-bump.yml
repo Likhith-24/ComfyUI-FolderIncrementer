@@ -1,0 +1,114 @@
+name: Version Bump
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Force a specific bump (auto|patch|minor|major)"
+        required: false
+        default: "auto"
+        type: choice
+        options: [auto, patch, minor, major]
+
+concurrency:
+  group: version-bump-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Bump version & tag
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore(release):')
+    outputs:
+      new_version: ${{ steps.bump.outputs.new_version }}
+      bumped: ${{ steps.bump.outputs.bumped }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Determine bump type
+        id: classify
+        shell: bash
+        run: |
+          set -e
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$last_tag" ]; then range="${last_tag}..HEAD"; else range="HEAD"; fi
+          msgs=$(git log --pretty=%s "$range")
+          forced="${{ github.event.inputs.bump }}"
+          if [ -n "$forced" ] && [ "$forced" != "auto" ]; then
+            echo "bump=$forced" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bump=none
+          while IFS= read -r m; do
+            if echo "$m" | grep -qiE '^(feat|fix|refactor|perf)(\(.+\))?!:|BREAKING CHANGE'; then
+              bump=major; break
+            elif echo "$m" | grep -qiE '^feat(\(.+\))?:'; then
+              bump=minor
+            elif echo "$m" | grep -qiE '^fix(\(.+\))?:' && [ "$bump" != "minor" ]; then
+              bump=patch
+            fi
+          done <<< "$msgs"
+          if [ "$bump" = "none" ]; then
+            if echo "$msgs" | grep -qiE 'feature|added|implement'; then bump=minor
+            elif echo "$msgs" | grep -qiE 'fix|bug|error|crash'; then bump=patch
+            fi
+          fi
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          echo "Detected bump: $bump"
+
+      - name: Bump pyproject version
+        id: bump
+        if: steps.classify.outputs.bump != 'none'
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re, pathlib
+          bump = "${{ steps.classify.outputs.bump }}"
+          p = pathlib.Path("pyproject.toml")
+          txt = p.read_text(encoding="utf-8")
+          m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', txt)
+          if not m:
+              print("bumped=false")
+              raise SystemExit(0)
+          maj, mn, pt = (int(x) for x in m.group(1).split("."))
+          if bump == "major":
+              maj, mn, pt = maj + 1, 0, 0
+          elif bump == "minor":
+              mn, pt = mn + 1, 0
+          elif bump == "patch":
+              pt = pt + 1
+          new = f"{maj}.{mn}.{pt}"
+          p.write_text(
+              re.sub(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{new}"', txt),
+              encoding="utf-8",
+          )
+          print(f"new_version={new}")
+          print("bumped=true")
+          PY
+
+      - name: Commit, tag, push
+        if: steps.bump.outputs.bumped == 'true'
+        env:
+          NEW: ${{ steps.bump.outputs.new_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore(release): v${NEW}"
+          git tag -a "v${NEW}" -m "Release v${NEW}"
+          git push origin HEAD --follow-tags

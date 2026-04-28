@@ -19,6 +19,11 @@ DATE_FORMAT_CHOICES = list(DATE_FORMAT_MAP.keys())
 # native separators for downstream scripts or other tools.
 PATH_STYLE_CHOICES = ["auto", "windows", "linux", "macos"]
 
+# Source-choice widget options.  Drives the JS companion's graph
+# traversal.  Python only consumes `source_filename` (already filled
+# by JS), so this widget is effectively a routing hint for the frontend.
+SOURCE_CHOICE_CHOICES = ["auto", "image", "video"]
+
 
 def _get_path_sep(style: str) -> str:
     """Return the path separator for the selected style."""
@@ -164,10 +169,23 @@ class FolderIncrementer:
                                "linux/macos=forward slash. Use 'auto' unless you "
                                "design workflows on one OS and run on another.",
                 }),
+                "source_choice": (SOURCE_CHOICE_CHOICES, {
+                    "default": "auto",
+                    "tooltip": "Which trigger to read the filename from. "
+                               "'image' → trigger_image, 'video' → trigger_video, "
+                               "'auto' → prefer video if connected, else image, "
+                               "else legacy `trigger`.",
+                }),
             },
             "optional": {
                 "trigger": ("*", {
-                    "tooltip": "Connect any output here – the node reads the connected filename automatically"}),
+                    "tooltip": "Legacy generic trigger – connect any output here."}),
+                "trigger_image": ("IMAGE", {
+                    "tooltip": "Connect a LoadImage / image source here. "
+                               "Used when source_choice = 'image' or 'auto'."}),
+                "trigger_video": ("*", {
+                    "tooltip": "Connect a LoadVideo / VHS_LoadVideo / video source here. "
+                               "Used when source_choice = 'video' or 'auto' (preferred)."}),
                 "source_filename": ("STRING", {"default": "",
                     "tooltip": "Auto-filled by JS from the connected node. "
                                "Drives folder name + output filename."}),
@@ -198,7 +216,9 @@ class FolderIncrementer:
 
     def increment(self, prefix="v", padding=3, label="default",
                   date_format="MM-DD-YYYY", path_style="auto",
-                  trigger=None, source_filename="", base_path="",
+                  source_choice="auto",
+                  trigger=None, trigger_image=None, trigger_video=None,
+                  source_filename="", base_path="",
                   folder_name_override="", reserve_version=False):
 
         sep = _get_path_sep(path_style)

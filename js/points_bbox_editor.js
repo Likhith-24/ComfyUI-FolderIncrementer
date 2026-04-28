@@ -184,21 +184,22 @@ class PointsBBoxEditor {
             if (dimsChanged) {
                 this._onImageLoaded?.();
             }
-            // Auto-fit only on first image load — preserve user's zoom/pan after that
+            // Auto-fit only on first image load — preserve user's zoom/pan after that.
+            // Single-pass fit deferred two animation frames to let LiteGraph
+            // finish reflow after setSize().  A second pass at 300ms was
+            // causing the visible "auto zoom in / zoom out" jitter when the
+            // first pass measured a stale bounding rect.
             if (!this._hasAutoFitted) {
                 this._hasAutoFitted = true;
-                // Double-pass: first after layout settles, second as safety net
-                const doFit = () => {
+                requestAnimationFrame(() => requestAnimationFrame(() => {
                     if (this._containerEl) {
                         const r = this._containerEl.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) this.fitView(r.width, r.height - TOOLBAR_H);
+                        if (r.width > 0 && r.height > 0) {
+                            this.fitView(r.width, r.height - TOOLBAR_H);
+                        }
                     }
                     this.node._mecRender?.();
-                };
-                requestAnimationFrame(() => {
-                    doFit();
-                    setTimeout(doFit, 300);
-                });
+                }));
             } else {
                 this.node._mecRender?.();
             }
@@ -657,9 +658,15 @@ app.registerExtension({
                 _isResizing = true;
                 node.setSize([snappedW, snappedH]);
                 if (node.graph) node.graph.setDirtyCanvas(true, true);
-                // Allow layout to settle before accepting new resize requests
-                requestAnimationFrame(() => { _isResizing = false; });
-            }, 50);
+                // Allow two animation frames so LiteGraph + ResizeObserver
+                // reflow fully settles before we accept new resize requests.
+                // One frame was not enough — the observer fired a second
+                // time mid-layout and re-triggered updateEditorSize, causing
+                // the canvas to "auto zoom in / zoom out" repeatedly.
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => { _isResizing = false; });
+                });
+            }, 80);
         }
         editor._onImageLoaded = updateEditorSize;
 
@@ -809,7 +816,9 @@ app.registerExtension({
                     editor._refLoaded = false;
                     editor._refImage = null;
                     editor._lastRefUrl = null;
-                    editor._hasAutoFitted = false;
+                    // Do NOT reset _hasAutoFitted here — keeping the user's
+                    // current zoom/pan when an image briefly disconnects
+                    // prevents the "crazy refit" jitter on reconnect.
                     syncCanvasSize();
                 }
                 render();

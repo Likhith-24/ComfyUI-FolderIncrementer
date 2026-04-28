@@ -2,13 +2,16 @@ import { app } from "../../scripts/app.js";
 
 /**
  * FolderIncrementer JS companion
- * - Accepts any link type on the "trigger" input
- * - Auto-extracts filename from the connected source node (Load Image,
- *   Load Video, VHS, etc.) and writes it into the source_filename widget
+ * - Accepts any link type on the "trigger" / "trigger_image" / "trigger_video" inputs
+ * - Auto-extracts filename from the connected loader node (LoadImage,
+ *   LoadVideo, VHS_LoadVideo, etc.) and writes it into the
+ *   source_filename widget. The loader's filename IS what we want as
+ *   our output versioning name.
  * - Traverses through Set/Get bus nodes, Reroute nodes, and arbitrary
  *   graph topologies to find the original source
- * - Syncs the filename right before prompt is queued to ensure it's
- *   always up-to-date
+ * - Honours the source_choice widget: "image" → trace trigger_image,
+ *   "video" → trace trigger_video, "auto" → prefer video if connected,
+ *   else image, else legacy `trigger`.
  */
 app.registerExtension({
     name: "Comfy.FolderIncrementer",
@@ -21,14 +24,18 @@ app.registerExtension({
         ];
         if (!targetNodes.includes(nodeData.name)) return;
 
-        // Accept any type on trigger input
+        // Accept any type on trigger inputs
         nodeType.prototype.onConnectInput = function () { return true; };
     },
 
     nodeCreated(node) {
         if (node.comfyClass !== "FolderIncrementer") return;
 
-        const FILENAME_WIDGETS = ["image", "video", "filename", "file", "audio"];
+        // Widget names commonly used by ComfyUI loaders to hold the
+        // filename of the file they read.  Order matters: most-specific
+        // first.  LoadImage uses "image", LoadVideo uses "video",
+        // VHS_LoadVideo uses "video" too, audio loaders use "audio".
+        const FILENAME_WIDGETS = ["image", "video", "filename", "file", "audio", "url"];
 
         // ── Check a single node for a filename widget ────────────────
         function getFilenameFromNode(n) {
@@ -97,16 +104,14 @@ app.registerExtension({
             return null;
         }
 
-        // ── Input loader types that should NOT supply filenames ─────
-        //    When a loader (LoadImage, LoadVideo, etc.) is directly
-        //    connected to trigger, its filename is a reference/source
-        //    file — not an output name.  Block these to avoid the
-        //    FolderIncrementer using input filenames as output names.
+        // ── Input loader detection ──────────────────────────────────
+        //    Loaders are exactly the nodes whose filename we DO want.
+        //    We don't block them — we extract from them.
         const INPUT_LOADER_TYPES = [
             "LoadImage", "Load Image", "LoadImageMask",
-            "LoadVideo", "Load Video", "VHS_LoadVideo",
+            "LoadVideo", "Load Video", "VHS_LoadVideo", "VHS_LoadVideoPath",
             "LoadAudio", "Load Audio", "VHS_LoadAudio",
-            "LoadImageBatch", "LoadImagesFromDir",
+            "LoadImageBatch", "LoadImagesFromDir", "LoadImagesFromDirectory",
         ];
 
         function isInputLoader(n) {
@@ -116,12 +121,10 @@ app.registerExtension({
         }
 
         // ── Shallow chain traversal to find a filename ───────────────
-        //    Follows the direct chain (reroute / Get→Set bus) to reach
-        //    the first "real" node.  Stops there — does NOT fan out
-        //    across all inputs of processing nodes like VAE Decode,
-        //    which previously caused wrong filenames in WAN workflows.
-        //    Input loaders are blocked: their filenames are source files,
-        //    not output names.
+        //    Follows reroute / Get→Set bus to reach the first "real"
+        //    node. If that node has a filename widget (e.g. LoadImage,
+        //    LoadVideo), return it.  Otherwise stop — do NOT fan out
+        //    across processing nodes' inputs.
         function findFilenameFromChain(startNode, maxDepth = 8) {
             let current = startNode;
             const visited = new Set();
@@ -147,28 +150,60 @@ app.registerExtension({
                     continue;
                 }
 
-                // Input loader directly connected → block its filename
-                if (isInputLoader(current)) {
-                    return null;
-                }
+                // Real node (loader or otherwise) — extract filename if present
+                const fn = getFilenameFromNode(current);
+                if (fn) return fn;
 
-                // Real node — check for filename widget and stop
-                return getFilenameFromNode(current);
+                // No filename here. If it's a loader without one, stop.
+                if (isInputLoader(current)) return null;
+
+                // Otherwise try walking one hop upstream (helps when
+                // user inserts a passthrough node between loader and
+                // FolderIncrementer).
+                const next = followFirstInput(current);
+                if (!next) return null;
+                current = next;
             }
             return null;
         }
 
-        // ── Extract filename starting from the trigger input ─────────
+        // ── Resolve which trigger input to traverse ──────────────────
+        function findInput(name) {
+            return node.inputs?.find(i => i.name === name) || null;
+        }
+
+        function getSourceNodeFromInput(inputName) {
+            const inp = findInput(inputName);
+            if (!inp || inp.link == null) return null;
+            const linkInfo = app.graph.links[inp.link];
+            if (!linkInfo) return null;
+            return app.graph.getNodeById(linkInfo.origin_id) || null;
+        }
+
+        function getSourceChoice() {
+            const w = node.widgets?.find(w => w.name === "source_choice");
+            const v = (w?.value || "auto").toString().toLowerCase();
+            return ["auto", "image", "video"].includes(v) ? v : "auto";
+        }
+
+        // ── Extract filename honouring source_choice ─────────────────
         function extractFilename() {
             if (!node.inputs) return null;
-            for (const inp of node.inputs) {
-                if (inp.name !== "trigger" || inp.link == null) continue;
-                const linkInfo = app.graph.links[inp.link];
-                if (!linkInfo) continue;
-                const srcNode = app.graph.getNodeById(linkInfo.origin_id);
-                if (!srcNode) continue;
-                const result = findFilenameFromChain(srcNode);
-                if (result) return result;
+
+            const choice    = getSourceChoice();
+            const imgSrc    = getSourceNodeFromInput("trigger_image");
+            const vidSrc    = getSourceNodeFromInput("trigger_video");
+            const legacySrc = getSourceNodeFromInput("trigger");
+
+            let order;
+            if (choice === "image")      order = [imgSrc, legacySrc, vidSrc];
+            else if (choice === "video") order = [vidSrc, legacySrc, imgSrc];
+            else                         order = [vidSrc, imgSrc, legacySrc]; // auto: video > image > legacy
+
+            for (const src of order) {
+                if (!src) continue;
+                const fn = findFilenameFromChain(src);
+                if (fn) return fn;
             }
             return null;
         }
@@ -187,8 +222,20 @@ app.registerExtension({
         const origOnConnectionsChange = node.onConnectionsChange;
         node.onConnectionsChange = function (type, index, connected, link_info) {
             origOnConnectionsChange?.apply(this, arguments);
-            if (connected) setTimeout(syncSourceFilename, 150);
+            // Re-sync whether connecting OR disconnecting: a disconnect
+            // may flip auto-mode from video back to image.
+            setTimeout(syncSourceFilename, 150);
         };
+
+        // Re-sync when source_choice widget changes
+        const choiceWidget = node.widgets?.find(w => w.name === "source_choice");
+        if (choiceWidget) {
+            const origCb = choiceWidget.callback;
+            choiceWidget.callback = function (v) {
+                origCb?.apply(this, arguments);
+                setTimeout(syncSourceFilename, 50);
+            };
+        }
 
         const origOnExecuted = node.onExecuted;
         node.onExecuted = function (output) {

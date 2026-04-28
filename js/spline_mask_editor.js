@@ -446,9 +446,17 @@ class SplineEditor {
         img.onload = () => {
             this._previewImage = img;
             this._previewLoaded = true;
+            const dimsChanged =
+                img.naturalWidth !== this._canvasW ||
+                img.naturalHeight !== this._canvasH;
             this._canvasW = img.naturalWidth;
             this._canvasH = img.naturalHeight;
-            this._hasAutoFitted = false; // re-fit to new image size
+            // Only re-fit when the underlying image dimensions actually
+            // changed (e.g. first load, or user swapped to a different
+            // resolution).  Otherwise preserve the user's zoom/pan to
+            // prevent the "auto zoom in / zoom out" jitter on every
+            // graph execution.
+            if (dimsChanged) this._hasAutoFitted = false;
             this.node.setDirtyCanvas(true);
         };
         img.onerror = () => { this._previewLoaded = false; };
@@ -581,6 +589,19 @@ class SplineEditor {
             this._hasAutoFitted = true;
             this._deserialize();
         }
+        // Re-fit the preview bounds if the widget was resized so that
+        // the editor stays inside its container, but keep the user's
+        // current zoom factor.  Without this guard, the bounds were
+        // re-fitted on every draw — causing the user-visible jitter.
+        if (this._previewBounds) {
+            const [bx, by, bw, bh] = this._previewBounds;
+            const drawH = widgetH - TOOLBAR_H;
+            if (bw <= 0 || bh <= 0 || drawH <= 0) {
+                this.autoFit(widgetW, widgetH);
+            }
+        } else {
+            this.autoFit(widgetW, widgetH);
+        }
 
         ctx.save();
         ctx.fillStyle = CANVAS_BG;
@@ -611,7 +632,6 @@ class SplineEditor {
         }
 
         // ── Preview area ─────────────────────────────────────────────
-        if (!this._previewBounds) this.autoFit(widgetW, widgetH);
         const [bx, by, bw, bh] = this._previewBounds || [0, TOOLBAR_H, widgetW, widgetH - TOOLBAR_H];
 
         ctx.save();
@@ -866,11 +886,16 @@ class SplineEditor {
 
         const [bx, by, bw, bh] = this._previewBounds;
         const factor = deltaY > 0 ? 0.92 : 1.08;
-        const newBw = Math.max(50, Math.min(bw * 10, bw * factor));
-        const newBh = Math.max(50, Math.min(bh * 10, bh * factor));
+        // Hard clamps prevent the bounds from collapsing to zero or
+        // exploding past the widget — both states caused the canvas
+        // to "misfit" wildly after a few scroll events.
+        const MIN_PX = 80;
+        const MAX_PX = 8000;
+        const newBw = Math.max(MIN_PX, Math.min(MAX_PX, bw * factor));
+        const newBh = Math.max(MIN_PX, Math.min(MAX_PX, bh * factor));
 
-        const relX = (localX - bx) / bw;
-        const relY = (localY - by) / bh;
+        const relX = (localX - bx) / Math.max(bw, 1);
+        const relY = (localY - by) / Math.max(bh, 1);
         this._previewBounds = [
             localX - relX * newBw,
             localY - relY * newBh,

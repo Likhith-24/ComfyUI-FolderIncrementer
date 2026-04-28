@@ -2,7 +2,30 @@
 
 All notable changes to ComfyUI-CustomNodePacks are documented here.
 
-## [1.8.0] – 2026-05-XX
+## [1.8.0] – 2026-04-29
+
+### Fixed
+
+- **FolderIncrementer (JS)** – removed the `isInputLoader` block that was
+  preventing filenames from `LoadImage` / `LoadVideo` / `VHS_LoadVideo`
+  from being read. Loaders are now exactly the nodes whose filenames
+  feed the versioning folder name.
+- **FolderIncrementer (JS)** – added `source_choice` routing
+  (`auto`/`image`/`video`) and `trigger_image` / `trigger_video` inputs.
+  In `auto` mode video is preferred over image when both are connected.
+  Re-syncs on disconnect and on `source_choice` change.
+- **Points & BBox Mask Editor** – fixed canvas auto-zoom-in/out jitter
+  on first image load and on graph execution. The double-pass `fitView`
+  (rAF + 300 ms) was measuring a stale bounding rect from a pre-reflow
+  layout, then snapping to the correct rect. Now a single deferred fit
+  (two animation frames) runs after LiteGraph reflow has settled.
+- **Points & BBox Mask Editor** – `_hasAutoFitted` is no longer reset on
+  reference-image disconnect, so brief upstream disconnects keep the
+  user's zoom/pan instead of crazy-refitting on reconnect.
+- **Spline Mask Editor** – wheel-zoom is hard-clamped (80 px ↔ 8 000 px)
+  to prevent the preview bounds from collapsing or exploding after a
+  few scroll events. Auto-fit only re-runs when the underlying image
+  dimensions change, not on every preview update.
 
 ### Added
 

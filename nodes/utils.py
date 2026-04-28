@@ -707,6 +707,40 @@ def points_to_arrays(points_list):
     return np.array(coords, dtype=np.float32), np.array(labels, dtype=np.int32)
 
 
+def normalize_bbox(b, default=(0, 0, 0, 0)):
+    """Normalize a BBOX-like input to a 4-tuple ``(x, y, w, h)``.
+
+    Accepts:
+      * 4-tuple/list ``(x, y, w, h)``
+      * list-of-bboxes (returns the first)
+      * numpy array of shape ``(4,)`` or ``(N, 4)``
+      * scalar / malformed values → returns ``default``
+    """
+    try:
+        if b is None:
+            return tuple(default)
+        if hasattr(b, "tolist"):
+            b = b.tolist()
+        if isinstance(b, (list, tuple)):
+            if len(b) == 0:
+                return tuple(default)
+            # list-of-bboxes (e.g. [[x,y,w,h], ...]) → first
+            if isinstance(b[0], (list, tuple)) and len(b[0]) == 4:
+                b = b[0]
+            if len(b) == 4 and all(not isinstance(v, (list, tuple)) for v in b):
+                out = []
+                for v in b:
+                    try:
+                        fv = float(v)
+                        out.append(int(fv) if fv.is_integer() else fv)
+                    except (TypeError, ValueError):
+                        return tuple(default)
+                return tuple(out)
+    except Exception:
+        pass
+    return tuple(default)
+
+
 def parse_bbox_input(bbox_json, bbox_input=None):
     """Parse bounding box from JSON string or BBOX input.
 
@@ -719,7 +753,7 @@ def parse_bbox_input(bbox_json, bbox_input=None):
     """
     import json
     if bbox_input is not None:
-        bx, by, bw, bh = bbox_input
+        bx, by, bw, bh = normalize_bbox(bbox_input)
         return np.array([bx, by, bx + bw, by + bh], dtype=np.float32)
     if bbox_json and bbox_json.strip():
         try:

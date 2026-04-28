@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 import json
 
+from .utils import normalize_bbox as _norm_bbox
+
 
 class BBoxCreate:
     """Manually define a bounding box (x, y, w, h)."""
@@ -114,7 +116,8 @@ class BBoxToMask:
         if reference_image is not None:
             _, h, w, _ = reference_image.shape
             image_height, image_width = int(h), int(w)
-        x, y, bw, bh = bbox
+        x, y, bw, bh = _norm_bbox(bbox)
+        x, y, bw, bh = int(x), int(y), int(bw), int(bh)
         mask = torch.zeros(1, image_height, image_width, dtype=torch.float32)
         x1 = max(0, x)
         y1 = max(0, y)
@@ -148,7 +151,8 @@ class BBoxPad:
     DESCRIPTION = "Pad a bounding box asymmetrically and clamp to image bounds."
 
     def pad(self, bbox, pad_left, pad_right, pad_top, pad_bottom, image_width, image_height):
-        x, y, bw, bh = bbox
+        x, y, bw, bh = _norm_bbox(bbox)
+        x, y, bw, bh = int(x), int(y), int(bw), int(bh)
         x1 = max(0, x - pad_left)
         y1 = max(0, y - pad_top)
         x2 = min(image_width, x + bw + pad_right)
@@ -179,7 +183,8 @@ class BBoxCrop:
     DESCRIPTION = "Crop image (and optionally mask) to the bounding box region."
 
     def crop(self, image, bbox, mask=None):
-        x, y, bw, bh = bbox
+        x, y, bw, bh = _norm_bbox(bbox)
+        x, y, bw, bh = int(x), int(y), int(bw), int(bh)
         B, H, W, C = image.shape
         x1 = max(0, x)
         y1 = max(0, y)

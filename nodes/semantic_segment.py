@@ -161,9 +161,22 @@ class SemanticSegmentMEC:
 
         masks = []
 
+        # Downsample very large images for inference to keep runtime sane.
+        # SegFormer is shift-equivariant; logits will be upsampled back to (H, W) below.
+        SEG_MAX_EDGE = 2048
+        long_edge = max(H, W)
+        if long_edge > SEG_MAX_EDGE:
+            scale = SEG_MAX_EDGE / float(long_edge)
+            inf_h = max(1, int(round(H * scale)))
+            inf_w = max(1, int(round(W * scale)))
+        else:
+            inf_h, inf_w = H, W
+
         for i in range(B):
             img_np = (image[i].cpu().numpy() * 255).astype(np.uint8)
             pil_img = PILImage.fromarray(img_np[:, :, :3])
+            if (inf_h, inf_w) != (H, W):
+                pil_img = pil_img.resize((inf_w, inf_h), PILImage.BILINEAR)
 
             inputs = processor(images=pil_img, return_tensors="pt")
             inputs = {k: v.to(dev) for k, v in inputs.items()}

@@ -878,6 +878,10 @@ class InpaintCropProMEC:
                          mask_invert: bool = False, mask_fill_holes: bool = False,
                          mask_hipass_filter: float = 0.0,
                          optional_context_mask: Optional[torch.Tensor] = None):
+        if image is None or not hasattr(image, "shape"):
+            raise ValueError("InpaintCropProMEC: 'image' input is missing or invalid (expected IMAGE tensor BxHxWxC).")
+        if mask is None or not hasattr(mask, "shape"):
+            raise ValueError("InpaintCropProMEC: 'mask' input is missing or invalid (expected MASK tensor BxHxW).")
         device = _get_device(image)
         B, H, W, C = image.shape
 
@@ -1153,7 +1157,25 @@ class InpaintStitchProMEC:
 
     def stitch(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
                blend_mode_override: str, color_match: bool):
+        if not isinstance(stitch_data, dict) or not stitch_data:
+            raise ValueError(
+                "InpaintStitchProMEC: 'stitch_data' is missing or empty. "
+                "Connect the STITCH_DATA output of an InpaintCropPro node."
+            )
         version = stitch_data.get("version", 1)
+        required_v1 = ("original_image", "crop_x", "crop_y", "crop_w", "crop_h",
+                       "blend_mode", "blend_radius", "stitch_blend_mask_crop",
+                       "original_mask")
+        required_v2 = ("canvas_image", "ctc_x", "ctc_y", "ctc_w", "ctc_h",
+                       "cto_x", "cto_y", "cto_w", "cto_h", "blend_mode",
+                       "blend_radius", "stitch_blend_mask_crop")
+        required = required_v2 if version >= 2 else required_v1
+        missing = [k for k in required if k not in stitch_data]
+        if missing:
+            raise ValueError(
+                f"InpaintStitchProMEC: stitch_data (v{version}) is missing keys: {missing}. "
+                "This usually means the STITCH_DATA input is unconnected or was produced by an incompatible node."
+            )
         if version >= 2:
             return self._stitch_v2(stitch_data, inpainted_image,
                                    blend_mode_override, color_match)
@@ -1510,7 +1532,22 @@ class InpaintPasteBackMEC:
 
     def paste_back(self, stitch_data: Dict[str, Any], inpainted_image: torch.Tensor,
                    upscale_method: str, feather_edges: bool, feather_radius: int):
+        if not isinstance(stitch_data, dict) or not stitch_data:
+            raise ValueError(
+                "InpaintPasteBackMEC: 'stitch_data' is missing or empty. "
+                "Connect the STITCH_DATA output of an InpaintCropPro node."
+            )
         version = stitch_data.get("version", 1)
+        required_v1 = ("original_image", "crop_x", "crop_y", "crop_w", "crop_h")
+        required_v2 = ("canvas_image", "ctc_x", "ctc_y", "ctc_w", "ctc_h",
+                       "cto_x", "cto_y", "cto_w", "cto_h")
+        required = required_v2 if version >= 2 else required_v1
+        missing = [k for k in required if k not in stitch_data]
+        if missing:
+            raise ValueError(
+                f"InpaintPasteBackMEC: stitch_data (v{version}) is missing keys: {missing}. "
+                "This usually means the STITCH_DATA input is unconnected or was produced by an incompatible node."
+            )
         device = _get_device(inpainted_image)
 
         if version >= 2:

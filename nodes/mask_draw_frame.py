@@ -145,9 +145,26 @@ class MaskDrawFrame:
             _, h, w, _ = reference_image.shape
             height, width = int(h), int(w)
 
+        # Sanitize canvas dimensions: clamp to safe range to avoid MemoryError
+        # / OverflowError when torture inputs (sys.maxsize, negative ints, etc.)
+        # are passed by automated callers.
+        MAX_DIM = 16384
+        try:
+            width = int(width)
+            height = int(height)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"MaskDrawFrame: width/height must be numeric, got width={width!r}, height={height!r}"
+            )
+        if width < 1 or height < 1 or width > MAX_DIM or height > MAX_DIM:
+            raise ValueError(
+                f"MaskDrawFrame: width/height out of range [1, {MAX_DIM}], "
+                f"got width={width}, height={height}"
+            )
+
         try:
             params = json.loads(shape_params_json) if isinstance(shape_params_json, str) else shape_params_json
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             params = {}
 
         # ── Normalise params: list → dict based on shape ──────────────

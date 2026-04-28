@@ -550,12 +550,31 @@ class MaskFailureExplainerMEC:
             device = _get_device(image)
             mask = mask.to(device=device, dtype=image.dtype)
 
+            # Downsample very large inputs for the heavy analytical kernels.
+            # The metrics are scale-invariant in spirit; the heatmap is upsampled back.
+            ANALYZE_MAX_EDGE = 2048
+            long_edge = max(H, W)
+            if long_edge > ANALYZE_MAX_EDGE:
+                scale = ANALYZE_MAX_EDGE / float(long_edge)
+                aH = max(1, int(round(H * scale)))
+                aW = max(1, int(round(W * scale)))
+                image_a = F.interpolate(
+                    image.permute(0, 3, 1, 2), size=(aH, aW),
+                    mode="bilinear", align_corners=False,
+                ).permute(0, 2, 3, 1).contiguous()
+                mask_a = F.interpolate(
+                    mask.unsqueeze(1), size=(aH, aW),
+                    mode="bilinear", align_corners=False,
+                ).squeeze(1)
+            else:
+                image_a, mask_a = image, mask
+
             # ── Run all 5 analysis metrics ────────────────────────────
-            brightness = _compute_brightness(image)                          # (B,)
-            blur = _compute_blur_score(image)                                # (B,)
-            boundary_contrast = _compute_boundary_contrast(image, mask)      # (B,)
-            color_confusion = _compute_boundary_color_confusion(image, mask) # (B,)
-            bg_complexity = _compute_bg_complexity(image, mask)               # (B,)
+            brightness = _compute_brightness(image_a)                          # (B,)
+            blur = _compute_blur_score(image_a)                                # (B,)
+            boundary_contrast = _compute_boundary_contrast(image_a, mask_a)    # (B,)
+            color_confusion = _compute_boundary_color_confusion(image_a, mask_a) # (B,)
+            bg_complexity = _compute_bg_complexity(image_a, mask_a)             # (B,)
 
             # ── Severity score ────────────────────────────────────────
             severity = _compute_severity(
@@ -570,9 +589,15 @@ class MaskFailureExplainerMEC:
 
             # ── Problem regions heatmap ───────────────────────────────
             heatmap = _build_problem_heatmap(
-                image, mask, brightness, blur,
+                image_a, mask_a, brightness, blur,
                 boundary_contrast, color_confusion, bg_complexity,
             )
+            # Upsample heatmap to match the original image size if we downsampled.
+            if heatmap.shape[-2:] != (H, W):
+                heatmap = F.interpolate(
+                    heatmap.unsqueeze(1), size=(H, W),
+                    mode="bilinear", align_corners=False,
+                ).squeeze(1)
 
             # ── Suggested method ──────────────────────────────────────
             method = _suggest_method(

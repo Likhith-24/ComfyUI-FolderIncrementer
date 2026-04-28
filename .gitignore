@@ -216,3 +216,7 @@ counters.json
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+  
+# Local DB scratch  
+*.db  
+param_history.db 

@@ -120,54 +120,64 @@ app.registerExtension({
             return INPUT_LOADER_TYPES.some(t => cls.includes(t) || title.includes(t));
         }
 
-        // ── Shallow chain traversal to find a filename ───────────────
-        //    Follows reroute / Get→Set bus to reach the first "real"
-        //    node. If that node has a filename widget (e.g. LoadImage,
-        //    LoadVideo), return it.  Otherwise stop — do NOT fan out
-        //    across processing nodes' inputs.
-        function findFilenameFromChain(startNode, maxDepth = 8) {
-            let current = startNode;
+        // ── BFS chain traversal to find a filename ───────────────────
+        //    Walks upstream from a starting node, fanning out across
+        //    every connected input of every intermediate node. Follows
+        //    reroutes and Get→Set bus pairs transparently. Stops a
+        //    branch when it hits a loader (whether or not it has a
+        //    filename) so we don't escape the source island.
+        //
+        //    Returns the first filename found (BFS ⇒ closest in graph
+        //    distance to ``startNode``), or null.
+        function findFilenameFromChain(startNode, maxNodes = 200) {
+            if (!startNode) return null;
             const visited = new Set();
+            const queue = [startNode];
 
-            for (let depth = 0; depth <= maxDepth; depth++) {
-                if (!current || visited.has(current.id)) return null;
+            while (queue.length && visited.size < maxNodes) {
+                const current = queue.shift();
+                if (!current || visited.has(current.id)) continue;
                 visited.add(current.id);
 
-                // Get bus → resolve to matching Set node, then follow its input
+                // Get bus → resolve to matching Set node(s), enqueue them
                 if (isGetBusNode(current)) {
-                    const setNodes = resolveGetNode(current);
-                    if (setNodes.length > 0) {
-                        const upstream = followFirstInput(setNodes[0]);
-                        current = upstream || setNodes[0];
-                        continue;
+                    for (const setNode of resolveGetNode(current)) {
+                        if (!visited.has(setNode.id)) queue.push(setNode);
                     }
-                    return null;
-                }
-
-                // Routing/reroute → follow through transparently
-                if (isRoutingNode(current)) {
-                    current = followFirstInput(current);
                     continue;
                 }
 
-                // Real node (loader or otherwise) — extract filename if present
+                // Routing/reroute → just follow through
+                if (isRoutingNode(current)) {
+                    const up = followFirstInput(current);
+                    if (up) queue.push(up);
+                    continue;
+                }
+
+                // Filename present on this node? Done.
                 const fn = getFilenameFromNode(current);
                 if (fn) return fn;
 
-                // No filename here. If it's a loader without one, stop.
-                if (isInputLoader(current)) return null;
+                // Loader with no filename widget → don't escape past it
+                if (isInputLoader(current)) continue;
 
-                // Otherwise try walking one hop upstream (helps when
-                // user inserts a passthrough node between loader and
-                // FolderIncrementer).
-                const next = followFirstInput(current);
-                if (!next) return null;
-                current = next;
+                // Generic processing node: enqueue every connected input
+                if (current.inputs) {
+                    for (const inp of current.inputs) {
+                        if (inp.link == null) continue;
+                        const link = app.graph.links[inp.link];
+                        if (!link) continue;
+                        const upstream = app.graph.getNodeById(link.origin_id);
+                        if (upstream && !visited.has(upstream.id)) {
+                            queue.push(upstream);
+                        }
+                    }
+                }
             }
             return null;
         }
 
-        // ── Resolve which trigger input to traverse ──────────────────
+        // ── Resolve which input(s) to traverse ───────────────────────
         function findInput(name) {
             return node.inputs?.find(i => i.name === name) || null;
         }
@@ -187,6 +197,11 @@ app.registerExtension({
         }
 
         // ── Extract filename honouring source_choice ─────────────────
+        //    Tries the named trigger inputs first (in priority order
+        //    based on source_choice). If none of them yields a result,
+        //    falls back to scanning EVERY connected input on the node
+        //    so the filename is found regardless of which socket the
+        //    user wired into.
         function extractFilename() {
             if (!node.inputs) return null;
 
@@ -198,9 +213,22 @@ app.registerExtension({
             let order;
             if (choice === "image")      order = [imgSrc, legacySrc, vidSrc];
             else if (choice === "video") order = [vidSrc, legacySrc, imgSrc];
-            else                         order = [vidSrc, imgSrc, legacySrc]; // auto: video > image > legacy
+            else                         order = [vidSrc, imgSrc, legacySrc]; // auto
 
             for (const src of order) {
+                if (!src) continue;
+                const fn = findFilenameFromChain(src);
+                if (fn) return fn;
+            }
+
+            // Fallback: scan every other connected input on the node.
+            const namedInputs = new Set(["trigger", "trigger_image", "trigger_video"]);
+            for (const inp of node.inputs) {
+                if (namedInputs.has(inp.name)) continue;
+                if (inp.link == null) continue;
+                const linkInfo = app.graph.links[inp.link];
+                if (!linkInfo) continue;
+                const src = app.graph.getNodeById(linkInfo.origin_id);
                 if (!src) continue;
                 const fn = findFilenameFromChain(src);
                 if (fn) return fn;
@@ -208,14 +236,64 @@ app.registerExtension({
             return null;
         }
 
-        // ── Auto-fill source_filename ────────────────────────────────
+        // ── Status display widget (read-only label on the node) ──────
+        function ensureStatusWidget() {
+            if (node._fiStatusWidget) return node._fiStatusWidget;
+            // DOM widget = a small element shown on the node body
+            if (typeof node.addDOMWidget === "function") {
+                const el = document.createElement("div");
+                el.style.cssText = [
+                    "padding: 2px 6px",
+                    "font: 11px monospace",
+                    "color: #9fe39f",
+                    "background: #1e1e1e",
+                    "border: 1px solid #333",
+                    "border-radius: 3px",
+                    "white-space: nowrap",
+                    "overflow: hidden",
+                    "text-overflow: ellipsis",
+                    "min-height: 16px",
+                ].join(";");
+                el.title = "Source filename detected from upstream loader";
+                el.textContent = "📄 (no source connected)";
+                const w = node.addDOMWidget("source_status", "div", el, {
+                    serialize: false,
+                    getValue: () => el.textContent,
+                    setValue: (v) => { el.textContent = v; },
+                });
+                w._el = el;
+                node._fiStatusWidget = w;
+                return w;
+            }
+            return null;
+        }
+
+        function setStatus(text) {
+            const w = ensureStatusWidget();
+            if (!w) return;
+            const el = w._el;
+            if (el && el.textContent !== text) {
+                el.textContent = text;
+                app.graph.setDirtyCanvas(true);
+            }
+        }
+
+        // ── Auto-fill source_filename + status display ───────────────
         function syncSourceFilename() {
             const filename = extractFilename();
-            if (!filename) return;
             const sfWidget = node.widgets?.find(w => w.name === "source_filename");
-            if (sfWidget && sfWidget.value !== filename) {
-                sfWidget.value = filename;
+            if (filename) {
+                if (sfWidget && sfWidget.value !== filename) {
+                    sfWidget.value = filename;
+                }
+                setStatus(`📄 ${filename}`);
                 app.graph.setDirtyCanvas(true);
+            } else {
+                // No filename detected — keep the existing source_filename
+                // (user may have typed one manually) but show that
+                // nothing was auto-detected.
+                const manual = sfWidget?.value && sfWidget.value.trim();
+                setStatus(manual ? `📝 ${manual} (manual)` : "📄 (no source connected)");
             }
         }
 

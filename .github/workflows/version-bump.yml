@@ -51,8 +51,12 @@ jobs:
           forced="${{ github.event.inputs.bump }}"
           if [ -n "$forced" ] && [ "$forced" != "auto" ]; then
             echo "bump=$forced" >> "$GITHUB_OUTPUT"
+            echo "explicit_version=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Detect explicit "chore: bump v1.2.3" / "chore(release): v1.2.3" /
+          # "release v1.2.3" style messages so manual bumps still get tagged.
+          explicit=$(echo "$msgs" | grep -oiE '\bv[0-9]+\.[0-9]+\.[0-9]+\b' | head -n1 | sed 's/^[vV]//')
           bump=none
           while IFS= read -r m; do
             if echo "$m" | grep -qiE '^(feat|fix|refactor|perf)(\(.+\))?!:|BREAKING CHANGE'; then
@@ -66,37 +70,45 @@ jobs:
           if [ "$bump" = "none" ]; then
             if echo "$msgs" | grep -qiE 'feature|added|implement'; then bump=minor
             elif echo "$msgs" | grep -qiE 'fix|bug|error|crash'; then bump=patch
+            elif [ -n "$explicit" ] || echo "$msgs" | grep -qiE '\b(bump|release|publish|version)\b'; then bump=patch
             fi
           fi
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
-          echo "Detected bump: $bump"
+          echo "explicit_version=$explicit" >> "$GITHUB_OUTPUT"
+          echo "Detected bump: $bump (explicit: ${explicit:-none})"
 
       - name: Bump pyproject version
         id: bump
-        if: steps.classify.outputs.bump != 'none'
+        if: steps.classify.outputs.bump != 'none' || steps.classify.outputs.explicit_version != ''
         shell: bash
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import re, pathlib
           bump = "${{ steps.classify.outputs.bump }}"
+          explicit = "${{ steps.classify.outputs.explicit_version }}"
           p = pathlib.Path("pyproject.toml")
           txt = p.read_text(encoding="utf-8")
           m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', txt)
           if not m:
               print("bumped=false")
               raise SystemExit(0)
-          maj, mn, pt = (int(x) for x in m.group(1).split("."))
-          if bump == "major":
-              maj, mn, pt = maj + 1, 0, 0
-          elif bump == "minor":
-              mn, pt = mn + 1, 0
-          elif bump == "patch":
-              pt = pt + 1
-          new = f"{maj}.{mn}.{pt}"
-          p.write_text(
-              re.sub(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{new}"', txt),
-              encoding="utf-8",
-          )
+          current = m.group(1)
+          if explicit:
+              new = explicit
+          else:
+              maj, mn, pt = (int(x) for x in current.split("."))
+              if bump == "major":
+                  maj, mn, pt = maj + 1, 0, 0
+              elif bump == "minor":
+                  mn, pt = mn + 1, 0
+              elif bump == "patch":
+                  pt = pt + 1
+              new = f"{maj}.{mn}.{pt}"
+          if new != current:
+              p.write_text(
+                  re.sub(r'(?m)^version\s*=\s*"[^"]+"', f'version = "{new}"', txt),
+                  encoding="utf-8",
+              )
           print(f"new_version={new}")
           print("bumped=true")
           PY
@@ -106,9 +118,19 @@ jobs:
         env:
           NEW: ${{ steps.bump.outputs.new_version }}
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Skip entirely if the tag already exists (manual tag or prior run).
+          if git rev-parse "v${NEW}" >/dev/null 2>&1 || \
+             git ls-remote --exit-code --tags origin "refs/tags/v${NEW}" >/dev/null 2>&1; then
+            echo "Tag v${NEW} already exists; nothing to do."
+            exit 0
+          fi
           git add pyproject.toml
-          git commit -m "chore(release): v${NEW}"
+          # Only commit if pyproject changed (manual bumps already committed).
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v${NEW}"
+          fi
           git tag -a "v${NEW}" -m "Release v${NEW}"
           git push origin HEAD --follow-tags

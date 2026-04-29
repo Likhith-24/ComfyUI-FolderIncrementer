@@ -218,7 +218,7 @@ class MaskPropagateVideo:
         model = model_info["model"]
         model_type = model_info["model_type"]
 
-        if model_type not in ("sam2", "sam2.1"):
+        if model_type != "sam2.1":
             return self._static(src_mask, B)
 
         try:

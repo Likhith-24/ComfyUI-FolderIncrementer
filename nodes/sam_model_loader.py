@@ -1,14 +1,16 @@
 """
-SAMModelLoaderMEC – Load SAM2/SAM2.1/SAM3 (or original SAM) checkpoints.
+SAMModelLoaderMEC – Load SAM2.1 / SAM3 checkpoints.
 
 Supports:
-  - SAM2 / SAM2.1 via official sam2 package (pip install SAM-2)
-  - SAM3 via sam2 package (uses SAM2 infrastructure)
-  - Original SAM (vit_h/l/b) via segment_anything package
+  - SAM 2.1 via official sam2 package (pip install SAM-2)
+  - SAM 3  via sam2 package (uses SAM2 infrastructure)
   - .safetensors / .pt / .pth checkpoint formats
   - Optional CPU-offload to save VRAM
   - Automatic model type detection from filename
   - Auto-download from HuggingFace Hub when model not found locally
+
+NOTE: Legacy SAM 1 (vit_h/l/b) and the original SAM 2.0 line are no
+longer supported; only SAM 2.1 and SAM 3 are exposed.
 """
 
 import os
@@ -90,12 +92,9 @@ def restore_device(sam_wrapper):
 
 # ── Official SAM2 config mapping for build_sam2 ──────────────────────
 # Keys match filename stems; values are config paths for the official
-# sam2 package (pip install SAM-2).
+# sam2 package (pip install SAM-2). Only SAM 2.1 configs are exposed —
+# SAM 2.0 has been removed from the supported model set.
 SAM2_CONFIGS = {
-    "sam2_hiera_tiny":    "configs/sam2/sam2_hiera_t.yaml",
-    "sam2_hiera_small":   "configs/sam2/sam2_hiera_s.yaml",
-    "sam2_hiera_base":    "configs/sam2/sam2_hiera_b+.yaml",
-    "sam2_hiera_large":   "configs/sam2/sam2_hiera_l.yaml",
     "sam2.1_hiera_tiny":  "configs/sam2.1/sam2.1_hiera_t.yaml",
     "sam2.1_hiera_small": "configs/sam2.1/sam2.1_hiera_s.yaml",
     "sam2.1_hiera_base":  "configs/sam2.1/sam2.1_hiera_b+.yaml",
@@ -103,6 +102,8 @@ SAM2_CONFIGS = {
 }
 
 # ── HuggingFace Hub auto-download registry ────────────────────────────
+# Only SAM 2.1 checkpoints are listed; SAM 2.0 and original SAM 1
+# (vit_h/l/b) have been retired.
 _DOWNLOAD_REGISTRY = {
     "sam2.1_hiera_large.pt": {
         "repo_id": "facebook/sam2.1-hiera-large",
@@ -120,37 +121,6 @@ _DOWNLOAD_REGISTRY = {
         "repo_id": "facebook/sam2.1-hiera-tiny",
         "filename": "sam2.1_hiera_tiny.pt",
     },
-    "sam2_hiera_large.pt": {
-        "repo_id": "facebook/sam2-hiera-large",
-        "filename": "sam2_hiera_large.pt",
-    },
-    "sam2_hiera_base_plus.pt": {
-        "repo_id": "facebook/sam2-hiera-base-plus",
-        "filename": "sam2_hiera_base_plus.pt",
-    },
-    "sam2_hiera_small.pt": {
-        "repo_id": "facebook/sam2-hiera-small",
-        "filename": "sam2_hiera_small.pt",
-    },
-    "sam2_hiera_tiny.pt": {
-        "repo_id": "facebook/sam2-hiera-tiny",
-        "filename": "sam2_hiera_tiny.pt",
-    },
-    "sam_vit_h_4b8939.pth": {
-        "repo_id": "ybelkada/segment-anything",
-        "filename": "checkpoints/sam_vit_h_4b8939.pth",
-        "subfolder": "checkpoints",
-    },
-    "sam_vit_l_0b3195.pth": {
-        "repo_id": "ybelkada/segment-anything",
-        "filename": "checkpoints/sam_vit_l_0b3195.pth",
-        "subfolder": "checkpoints",
-    },
-    "sam_vit_b_01ec64.pth": {
-        "repo_id": "ybelkada/segment-anything",
-        "filename": "checkpoints/sam_vit_b_01ec64.pth",
-        "subfolder": "checkpoints",
-    },
 }
 
 
@@ -166,9 +136,8 @@ def _detect_config(model_name):
         normalized_name = name.replace(".", "").replace("_", "")
         if normalized_key in normalized_name:
             return config
-    # Heuristic fallback
-    is_21 = "2.1" in name or "2_1" in name
-    prefix = "configs/sam2.1/sam2.1" if is_21 else "configs/sam2/sam2"
+    # Heuristic fallback — SAM 2.1 is the only supported SAM2 variant.
+    prefix = "configs/sam2.1/sam2.1"
     if "tiny" in name or "_t." in name:
         return f"{prefix}_hiera_t.yaml"
     if "small" in name or "_s." in name:
@@ -180,17 +149,14 @@ def _detect_config(model_name):
 
 
 class SAMModelLoaderMEC:
-    """Load a Segment Anything Model (SAM / SAM2 / SAM2.1 / SAM3).
+    """Load a Segment Anything Model (SAM 2.1 or SAM 3).
 
     Uses the official ``sam2`` Python package (pip install SAM-2) for
-    SAM2/2.1/SAM3 models.  Falls back to ``segment_anything`` for
-    original SAM (ViT-H/L/B).
+    both architectures. Legacy SAM 1 (vit_h/l/b) and the original
+    SAM 2.0 line are not supported.
     """
 
-    SUPPORTED_TYPES = [
-        "auto", "sam2", "sam2.1", "sam3",
-        "sam_vit_h", "sam_vit_l", "sam_vit_b",
-    ]
+    SUPPORTED_TYPES = ["auto", "sam2.1", "sam3"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -225,9 +191,8 @@ class SAMModelLoaderMEC:
                     "default": "auto",
                     "tooltip": (
                         "Model architecture. 'auto' detects from filename.\n"
-                        "sam2/sam2.1: Segment Anything 2 (requires sam2 package)\n"
-                        "sam3: SAM3 (uses SAM2 infrastructure)\n"
-                        "sam_vit_*: Original SAM (requires segment_anything)"
+                        "sam2.1: Segment Anything 2.1 (requires sam2 package)\n"
+                        "sam3:   SAM3 (uses SAM2 infrastructure)"
                     ),
                 }),
                 "device": (["auto", "cuda", "cpu"], {"default": "auto"}),
@@ -271,7 +236,7 @@ class SAMModelLoaderMEC:
     FUNCTION = "load"
     CATEGORY = "MaskEditControl/SAM"
     DESCRIPTION = (
-        "Load SAM/SAM2/SAM2.1/SAM3 model. "
+        "Load SAM 2.1 or SAM 3 model. "
         "Auto-detects architecture from filename. "
         "Supports VRAM offload."
     )
@@ -295,14 +260,16 @@ class SAMModelLoaderMEC:
         sam_model = None
         load_method = "unknown"
 
-        if detected_type in ("sam2", "sam2.1", "sam3"):
-            sam_model, load_method = self._load_sam2_family(
-                model_path, clean_name, detected_type, torch_dtype, device, offload_to_cpu
+        if detected_type not in ("sam2.1", "sam3"):
+            raise ValueError(
+                f"Unsupported SAM model_type '{detected_type}'. "
+                f"Only 'sam2.1' and 'sam3' are supported. "
+                f"Legacy SAM 1 (vit_h/l/b) and SAM 2.0 have been removed."
             )
-        else:
-            sam_model, load_method = self._load_original_sam(
-                model_path, detected_type, torch_dtype, device, offload_to_cpu
-            )
+
+        sam_model, load_method = self._load_sam2_family(
+            model_path, clean_name, detected_type, torch_dtype, device, offload_to_cpu
+        )
 
         if sam_model is None:
             sam_model, load_method = self._load_generic_fallback(
@@ -456,20 +423,14 @@ class SAMModelLoaderMEC:
             return "sam3"
         if "sam2.1" in name or "sam2_1" in name:
             return "sam2.1"
-        if "sam2" in name:
-            return "sam2"
-        if "vit_h" in name:
-            return "sam_vit_h"
-        if "vit_l" in name:
-            return "sam_vit_l"
-        if "vit_b" in name:
-            return "sam_vit_b"
-        return "sam2"
+        # Default everything else (including unlabelled checkpoints) to
+        # SAM 2.1 — SAM 2.0 / SAM 1 are no longer supported.
+        return "sam2.1"
 
-    # ── SAM2 / SAM2.1 / SAM3 ─────────────────────────────────────────
+    # ── SAM 2.1 / SAM 3 ──────────────────────────────────────────────
     def _load_sam2_family(self, model_path, model_name, model_type,
                           torch_dtype, device, offload):
-        """Load SAM2/2.1/SAM3 model using the official sam2 package.
+        """Load SAM 2.1 / SAM 3 model using the official sam2 package.
 
         Strategy:
           1. Load state_dict from any format (safetensors/pt/pth)
@@ -547,24 +508,6 @@ class SAMModelLoaderMEC:
         if isinstance(sd, dict) and "model" in sd:
             sd = sd["model"]
         return sd
-
-    # ── Original SAM ──────────────────────────────────────────────────
-    @staticmethod
-    def _load_original_sam(model_path, detected_type, torch_dtype, device, offload):
-        try:
-            from segment_anything import sam_model_registry
-            arch_map = {"sam_vit_h": "vit_h", "sam_vit_l": "vit_l", "sam_vit_b": "vit_b"}
-            arch = arch_map.get(detected_type, "vit_h")
-            model = sam_model_registry[arch](checkpoint=model_path)
-            model = model.to(torch_dtype)
-            if not offload:
-                model = model.to(device)
-            return model, "sam_registry"
-        except ImportError:
-            logger.debug("[MEC] segment_anything not available")
-        except Exception as e:
-            logger.debug(f"[MEC] Original SAM failed: {e}")
-        return None, "failed"
 
     # ── Generic fallback ──────────────────────────────────────────────
     @staticmethod

@@ -89,20 +89,21 @@ Core packages (`torch`, `torchvision`, `numpy`) are already provided by ComfyUI 
 
 ### 3. Place SAM model checkpoints
 
-Download SAM / SAM2 / SAM2.1 / SAM3 weights and place them in:
+Download SAM 2.1 / SAM 3 weights and place them in:
 
 ```
-ComfyUI/models/sams/        ← SAM ViT-H/L/B, SAM3
-ComfyUI/models/sam2/         ← SAM2, SAM2.1
+ComfyUI/models/sams/        ← SAM 3
+ComfyUI/models/sam2/        ← SAM 2.1
 ```
 
 | Model | File | Source |
 |-------|------|--------|
-| SAM ViT-H | `sam_vit_h_4b8939.pth` | [Meta AI](https://github.com/facebookresearch/segment-anything) |
 | SAM2.1 Large | `sam2.1_hiera_large.pt` | [Meta AI](https://github.com/facebookresearch/sam2) |
 | SAM3 | `sam3_hiera_large.pt` | [Meta AI](https://github.com/facebookresearch/sam3) |
 
 The **SAM Model Loader** node auto-detects model type from the filename.
+
+> **Note:** Legacy SAM 1 (ViT-H/L/B) and the original SAM 2.0 line are no longer supported. Only SAM 2.1 and SAM 3 are exposed.
 
 ### 4. (Optional) ViTMatte matting
 
@@ -158,12 +159,12 @@ All nodes appear in the ComfyUI menu under **MaskEditControl/** categories.
 
 #### SAM Model Loader (MEC)
 
-Loads SAM / SAM2 / SAM2.1 / SAM3 checkpoints with optional VRAM offload.
+Loads SAM 2.1 / SAM 3 checkpoints with optional VRAM offload.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `model_name` | — | Checkpoint filename (auto-listed from `models/sams/` and `models/sam2/`) |
-| `model_type` | `auto` | Force type: `sam_vit_h`, `sam_vit_l`, `sam_vit_b`, `sam2`, `sam2.1`, `sam3`, or `auto` |
+| `model_type` | `auto` | Force type: `sam2.1`, `sam3`, or `auto` |
 | `device` | `cuda` | `cuda` / `cpu` |
 | `offload_to_cpu` | `false` | Keep model on CPU, move to GPU only during inference (saves ~2–4 GB VRAM) |
 | `dtype` | `float16` | `float16` / `bfloat16` / `float32` |
@@ -174,7 +175,7 @@ Loads SAM / SAM2 / SAM2.1 / SAM3 checkpoints with optional VRAM offload.
 
 #### SAM Mask Generator (MEC)
 
-Runs SAM/SAM2/SAM3 inference with point + bbox prompts, iterative refinement, and auto-negative point sampling.
+Runs SAM 2.1 / SAM 3 inference with point + bbox prompts, iterative refinement, and auto-negative point sampling.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -216,7 +217,7 @@ Run SAM inference and view **all 3 candidate masks** side-by-side with IoU score
 
 #### Unified Segmentation (MEC)
 
-One-node dispatcher for **SAM1, SAM2/2.1, SAM3, SeC, VideoMaMa** with automatic image vs. video detection.
+One-node dispatcher for **SAM 2.1, SAM 3, SeC, VideoMaMa** with automatic image vs. video detection.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -894,7 +895,7 @@ All 47 nodes at a glance:
 
 | # | Node | Category | VRAM Tier | What it does |
 |---|------|----------|-----------|-------------|
-| 1 | SAM Model Loader | SAM | 2 | Load SAM/SAM2/SAM3 checkpoints |
+| 1 | SAM Model Loader | SAM | 2 | Load SAM 2.1 / SAM 3 checkpoints |
 | 2 | SAM Mask Generator | SAM | 2 | SAM inference with point + bbox prompts |
 | 3 | SAM Multi-Mask Picker | SAM | 2 | View all 3 SAM candidates, pick interactively |
 | 4 | Unified Segmentation | SAM | 2 | One-node dispatcher for all segmentation backends |
@@ -1180,7 +1181,7 @@ ComfyUI-CustomNodePacks/
 │   ├── spline_mask_editor.js       # Frontend: spline drawing canvas (normalized coords)
 │   └── universal_reroute.js        # Frontend: Nuke-style dot
 ├── nodes/
-│   ├── sam_model_loader.py         # SAM/SAM2/SAM3 model loader
+│   ├── sam_model_loader.py         # SAM 2.1 / SAM 3 model loader
 │   ├── sam_mask_generator.py       # SAM inference engine
 │   ├── sam_multi_mask_picker.py    # Multi-mask picker + JS widget
 │   ├── sam_vitmatte_pipeline.py    # SAM → ViTMatte end-to-end pipeline

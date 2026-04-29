@@ -466,10 +466,15 @@ class MECContextInpainter:
             cx = (x0 + x1) * 0.5
             hh = (y1 - y0) * float(crop_padding) * 0.5
             ww = (x1 - x0) * float(crop_padding) * 0.5
-            y0 = max(0, int(cy - hh)); y1 = min(H - 1, int(cy + hh))
-            x0 = max(0, int(cx - ww)); x1 = min(W - 1, int(cx + ww))
+            y0 = max(0, int(cy - hh))
+            y1 = min(H - 1, int(cy + hh))
+            x0 = max(0, int(cx - ww))
+            x1 = min(W - 1, int(cx + ww))
         else:
-            y0 = x0 = 0; y1 = H - 1; x1 = W - 1
+            y0 = 0
+            x0 = 0
+            y1 = H - 1
+            x1 = W - 1
 
         # ---- region split for wildcard prompts ---------------------------
         labels, n_reg = _label_regions(m)

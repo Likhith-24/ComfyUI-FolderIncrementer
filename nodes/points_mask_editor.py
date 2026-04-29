@@ -227,10 +227,10 @@ class PointsMaskEditor:
             yy = torch.arange(h, device=mask.device, dtype=torch.float32)
             xx = torch.arange(w, device=mask.device, dtype=torch.float32)
             # Distance to nearest edge (negative = inside)
-            dy = torch.max(yy.unsqueeze(1).expand(h, w) - (y2 - 1),
-                           (y1).float() - yy.unsqueeze(1).expand(h, w)).clamp(min=0)
-            dx = torch.max(xx.unsqueeze(0).expand(h, w) - (x2 - 1),
-                           (x1).float() - xx.unsqueeze(0).expand(h, w)).clamp(min=0)
+            dy = torch.max(yy.unsqueeze(1).expand(h, w) - float(y2 - 1),
+                           float(y1) - yy.unsqueeze(1).expand(h, w)).clamp(min=0)
+            dx = torch.max(xx.unsqueeze(0).expand(h, w) - float(x2 - 1),
+                           float(x1) - xx.unsqueeze(0).expand(h, w)).clamp(min=0)
             dist = torch.sqrt(dx ** 2 + dy ** 2)
             brush = torch.exp(-dist ** 2 / (2.0 * sigma ** 2))
             # Ensure fully 1.0 inside the rect

@@ -1010,21 +1010,28 @@ app.registerExtension({
             }
         };
 
-        // Interactive editor widget
+        // Interactive editor widget.
+        //
+        // ComfyUI translates ctx to the node's origin BEFORE calling draw(),
+        // so widget-local X must be 0 (NOT node.pos[0] — that absolute graph
+        // coordinate would push the entire canvas outside the node body and
+        // make the editor look "dead" in the UI).
         const widget = node.addCustomWidget({
             name: "spline_editor_canvas",
             type: "custom",
             value: "",
-            draw(ctx, node, widgetW, widgetY, widgetH) {
+            draw(ctx, _node, widgetW, widgetY, widgetH) {
                 const realH = Math.max(300, widgetH || 440);
-                editor.draw(ctx, node.pos[0], widgetY, widgetW, realH);
+                editor.draw(ctx, 0, widgetY, widgetW, realH);
             },
-            computeSize(w) {
-                return [w, 440];
+            computeSize(_w) {
+                return [_w, 440];
             },
-            onMouseDown(e, pos, node) {
+            // pos is already widget-local (LiteGraph subtracts widget Y in
+            // processNodeWidgets) so we forward it directly.
+            onMouseDown(e, pos, _node) {
                 if (editor.onMouseDown(pos[0], pos[1], e)) {
-                    node.setDirtyCanvas(true);
+                    _node.setDirtyCanvas(true);
                     return true;
                 }
                 return false;

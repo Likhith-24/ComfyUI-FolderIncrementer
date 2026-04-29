@@ -199,41 +199,72 @@ app.registerExtension({
         // ── Extract filename honouring source_choice ─────────────────
         //    Tries the named trigger inputs first (in priority order
         //    based on source_choice). If none of them yields a result,
-        //    falls back to scanning EVERY connected input on the node
-        //    so the filename is found regardless of which socket the
-        //    user wired into.
+        //    falls back to scanning EVERY connected input on the node.
+        //    Final fallback: scan the ENTIRE graph for loader nodes
+        //    (so it works in big workflows even when nothing is wired
+        //    into FolderIncrementer's trigger inputs).
+        //
+        //    Returns { filename, mode } where mode is one of
+        //    "trigger", "input", "global".
         function extractFilename() {
-            if (!node.inputs) return null;
+            const choice = getSourceChoice();
 
-            const choice    = getSourceChoice();
-            const imgSrc    = getSourceNodeFromInput("trigger_image");
-            const vidSrc    = getSourceNodeFromInput("trigger_video");
-            const legacySrc = getSourceNodeFromInput("trigger");
+            if (node.inputs) {
+                const imgSrc    = getSourceNodeFromInput("trigger_image");
+                const vidSrc    = getSourceNodeFromInput("trigger_video");
+                const legacySrc = getSourceNodeFromInput("trigger");
 
-            let order;
-            if (choice === "image")      order = [imgSrc, legacySrc, vidSrc];
-            else if (choice === "video") order = [vidSrc, legacySrc, imgSrc];
-            else                         order = [vidSrc, imgSrc, legacySrc]; // auto
+                let order;
+                if (choice === "image")      order = [imgSrc, legacySrc, vidSrc];
+                else if (choice === "video") order = [vidSrc, legacySrc, imgSrc];
+                else                         order = [vidSrc, imgSrc, legacySrc]; // auto
 
-            for (const src of order) {
-                if (!src) continue;
-                const fn = findFilenameFromChain(src);
-                if (fn) return fn;
+                for (const src of order) {
+                    if (!src) continue;
+                    const fn = findFilenameFromChain(src);
+                    if (fn) return { filename: fn, mode: "trigger" };
+                }
+
+                // Fallback: scan every other connected input on the node.
+                const namedInputs = new Set(["trigger", "trigger_image", "trigger_video"]);
+                for (const inp of node.inputs) {
+                    if (namedInputs.has(inp.name)) continue;
+                    if (inp.link == null) continue;
+                    const linkInfo = app.graph.links[inp.link];
+                    if (!linkInfo) continue;
+                    const src = app.graph.getNodeById(linkInfo.origin_id);
+                    if (!src) continue;
+                    const fn = findFilenameFromChain(src);
+                    if (fn) return { filename: fn, mode: "input" };
+                }
             }
 
-            // Fallback: scan every other connected input on the node.
-            const namedInputs = new Set(["trigger", "trigger_image", "trigger_video"]);
-            for (const inp of node.inputs) {
-                if (namedInputs.has(inp.name)) continue;
-                if (inp.link == null) continue;
-                const linkInfo = app.graph.links[inp.link];
-                if (!linkInfo) continue;
-                const src = app.graph.getNodeById(linkInfo.origin_id);
-                if (!src) continue;
-                const fn = findFilenameFromChain(src);
-                if (fn) return fn;
+            // ── Global fallback: scan every loader in the graph ──────
+            const allNodes = app.graph._nodes || app.graph.nodes || [];
+            const candidates = [];
+            for (const n of allNodes) {
+                if (!isInputLoader(n)) continue;
+                const fn = getFilenameFromNode(n);
+                if (!fn) continue;
+                const blob = ((n.comfyClass || "") + " " + (n.title || "")).toLowerCase();
+                const isVideo = /video|vhs/.test(blob);
+                const isImage = /image/.test(blob) && !isVideo;
+                candidates.push({ node: n, filename: fn, isVideo, isImage });
             }
-            return null;
+            if (candidates.length === 0) return null;
+
+            const score = (c) => {
+                if (choice === "video") return c.isVideo ? 2 : (c.isImage ? 0 : 1);
+                if (choice === "image") return c.isImage ? 2 : (c.isVideo ? 0 : 1);
+                // auto: prefer video > image > other
+                return c.isVideo ? 2 : (c.isImage ? 1 : 0);
+            };
+            candidates.sort((a, b) => {
+                const s = score(b) - score(a);
+                if (s !== 0) return s;
+                return (b.node.id || 0) - (a.node.id || 0);
+            });
+            return { filename: candidates[0].filename, mode: "global" };
         }
 
         // ── Status display widget (read-only label on the node) ──────
@@ -280,20 +311,20 @@ app.registerExtension({
 
         // ── Auto-fill source_filename + status display ───────────────
         function syncSourceFilename() {
-            const filename = extractFilename();
+            const result = extractFilename();
             const sfWidget = node.widgets?.find(w => w.name === "source_filename");
-            if (filename) {
-                if (sfWidget && sfWidget.value !== filename) {
-                    sfWidget.value = filename;
+            if (result && result.filename) {
+                if (sfWidget && sfWidget.value !== result.filename) {
+                    sfWidget.value = result.filename;
                 }
-                setStatus(`📄 ${filename}`);
+                const tag = result.mode === "global" ? "\uD83C\uDF10"  // globe for global scan
+                          : result.mode === "input"  ? "\uD83D\uDD0C"  // plug for non-trigger input
+                                                     : "\uD83D\uDCC4"; // page for trigger
+                setStatus(`${tag} ${result.filename}`);
                 app.graph.setDirtyCanvas(true);
             } else {
-                // No filename detected — keep the existing source_filename
-                // (user may have typed one manually) but show that
-                // nothing was auto-detected.
                 const manual = sfWidget?.value && sfWidget.value.trim();
-                setStatus(manual ? `📝 ${manual} (manual)` : "📄 (no source connected)");
+                setStatus(manual ? `\uD83D\uDCDD ${manual} (manual)` : "\uD83D\uDCC4 (no source connected)");
             }
         }
 
@@ -331,5 +362,22 @@ app.registerExtension({
         // Initial sync + periodic retry (graph may not be fully loaded yet)
         setTimeout(syncSourceFilename, 500);
         setTimeout(syncSourceFilename, 2000);
+
+        // Slow polling: re-scan every 3s so changes elsewhere in a big
+        // workflow (e.g. user picks a different file in a Load Video
+        // node, or loads a new Set/Get pair) propagate without needing
+        // to wiggle our own connections.
+        if (node._fiPollTimer) clearInterval(node._fiPollTimer);
+        node._fiPollTimer = setInterval(() => {
+            // Stop polling if the node is gone from the graph
+            const stillThere = (app.graph._nodes || app.graph.nodes || [])
+                .some(n => n.id === node.id);
+            if (!stillThere) {
+                clearInterval(node._fiPollTimer);
+                node._fiPollTimer = null;
+                return;
+            }
+            syncSourceFilename();
+        }, 3000);
     },
 });

@@ -314,15 +314,26 @@ app.registerExtension({
                 else if (choice === "video") order = [vidSrc, legacySrc, imgSrc];
                 else                         order = [vidSrc, imgSrc, legacySrc]; // auto
 
+                // MANUAL bug-fix (Apr 2026): when the user explicitly
+                // wires a loader into trigger_image / trigger_video /
+                // trigger, that wire IS the explicit choice. Trust it
+                // even if the resolved filename's extension does not
+                // match `source_choice` (e.g. AV-Handles-trim of a
+                // .mov is wired to trigger_image — the source name is
+                // still the .mov, and the user knows it). The
+                // classification gate now only applies to the global
+                // fallback below, where we're guessing among unwired
+                // candidates.
                 for (const src of order) {
                     if (!src) continue;
                     const fn = findFilenameFromChain(src);
-                    if (fn && matchesChoice(fn, choice)) {
+                    if (fn) {
                         return { filename: fn, mode: "trigger" };
                     }
                 }
 
                 // Fallback: scan every other connected input on the node.
+                // Same trust principle: a real wire wins over a global guess.
                 const namedInputs = new Set(["trigger", "trigger_image", "trigger_video"]);
                 for (const inp of node.inputs) {
                     if (namedInputs.has(inp.name)) continue;
@@ -332,7 +343,7 @@ app.registerExtension({
                     const src = app.graph.getNodeById(linkInfo.origin_id);
                     if (!src) continue;
                     const fn = findFilenameFromChain(src);
-                    if (fn && matchesChoice(fn, choice)) {
+                    if (fn) {
                         return { filename: fn, mode: "input" };
                     }
                 }

@@ -51,12 +51,25 @@ app.registerExtension({
         }
 
         // ── Resolve a Get node → find matching Set node ──────────────
+        //    Different bus implementations (kjnodes, rgthree, cg-use-everywhere,
+        //    easy-use) name the key widget differently — try them all.
+        const BUS_KEY_WIDGETS = [
+            "Constant", "constant", "value",
+            "Key", "key", "Name", "name",
+            "variable", "Variable", "label", "Label",
+            "id", "ID",
+        ];
+        function getBusKey(n) {
+            // Try every known widget name for the key.
+            const w = n.widgets?.find(w => BUS_KEY_WIDGETS.includes(w.name));
+            if (w?.value) return String(w.value).trim().toLowerCase();
+            // Fall back to title prefix: "Set foo" / "Get_foo" / "Get: foo".
+            const m = (n.title || "").match(/^(set|get)[\s_:\-]+(.+)$/i);
+            return m ? m[2].trim().toLowerCase() : "";
+        }
+
         function resolveGetNode(getNode) {
-            const constW = getNode.widgets?.find(
-                w => w.name === "Constant" || w.name === "constant" || w.name === "value"
-            );
-            if (!constW?.value) return [];
-            const busName = String(constW.value).trim().toLowerCase();
+            const busName = getBusKey(getNode);
             if (!busName) return [];
 
             const results = [];
@@ -68,10 +81,7 @@ app.registerExtension({
                 const isSet = title.startsWith("set") || cls.startsWith("set")
                            || cls.includes("setnode");
                 if (!isSet) continue;
-                const setConst = n.widgets?.find(
-                    w => w.name === "Constant" || w.name === "constant" || w.name === "value"
-                );
-                if (setConst && String(setConst.value).trim().toLowerCase() === busName) {
+                if (getBusKey(n) === busName) {
                     results.push(n);
                 }
             }
@@ -196,6 +206,43 @@ app.registerExtension({
             return ["auto", "image", "video"].includes(v) ? v : "auto";
         }
 
+        // ── Name format (mirrors Python `_format_source_name`) ───────
+        const NAME_FORMATS = ["basename", "strip_tags", "first_segment"];
+        const TRAILING_TAG_RE = /[._\-](\d{3,4}p?|\d{2,3}fps|[248]k|uhd|hd|sd|sdr|hdr|raw|proxy|final|wip)$/i;
+
+        function getNameFormat() {
+            const w = node.widgets?.find(w => w.name === "name_format");
+            const v = (w?.value || "basename").toString();
+            return NAME_FORMATS.includes(v) ? v : "basename";
+        }
+
+        function stripExt(filename) {
+            if (!filename) return filename;
+            const dot = filename.lastIndexOf(".");
+            if (dot <= 0) return filename;
+            return filename.slice(0, dot);
+        }
+
+        function formatSourceName(rawFilename, fmt) {
+            // rawFilename may include extension; status display always strips it.
+            let stem = stripExt(rawFilename);
+            if (!stem) return rawFilename;
+            if (fmt === "first_segment") {
+                const m = stem.split(/[._]/);
+                return (m && m[0]) ? m[0] : stem;
+            }
+            if (fmt === "strip_tags") {
+                let cleaned = stem;
+                for (let i = 0; i < 4; i++) {
+                    const next = cleaned.replace(TRAILING_TAG_RE, "");
+                    if (next === cleaned) break;
+                    cleaned = next;
+                }
+                return cleaned || stem;
+            }
+            return stem; // basename
+        }
+
         // ── Extract filename honouring source_choice ─────────────────
         //    Tries the named trigger inputs first (in priority order
         //    based on source_choice). If none of them yields a result,
@@ -206,6 +253,36 @@ app.registerExtension({
         //
         //    Returns { filename, mode } where mode is one of
         //    "trigger", "input", "global".
+        //
+        //    BUG-FIX (Apr 2026): when source_choice is explicitly
+        //    "image" or "video" we must NOT return a filename whose
+        //    media type contradicts the user's choice. Previously, if
+        //    source_choice="video" and only the legacy `trigger` input
+        //    was connected to a still-image loader, we'd happily return
+        //    the .png filename. Now we classify the candidate by
+        //    extension (and by loader node type when available) and
+        //    skip mismatches, falling through to the global type-aware
+        //    scan instead.
+        const IMAGE_EXT_RE = /\.(png|jpe?g|webp|bmp|tiff?|gif|tga|exr|hdr|heic|avif)$/i;
+        const VIDEO_EXT_RE = /\.(mp4|mov|webm|mkv|avi|flv|m4v|wmv|mpeg|mpg|ts|gif)$/i;
+
+        function classifyFilename(fn) {
+            if (!fn) return "unknown";
+            // .gif counts as video here only when explicitly chosen video;
+            // default to image to match common usage.
+            if (/\.gif$/i.test(fn)) return "image";
+            if (VIDEO_EXT_RE.test(fn)) return "video";
+            if (IMAGE_EXT_RE.test(fn)) return "image";
+            return "unknown";
+        }
+
+        function matchesChoice(fn, choice) {
+            if (choice === "auto") return true;
+            const cls = classifyFilename(fn);
+            if (cls === "unknown") return true; // can't tell -- be lenient
+            return cls === choice;
+        }
+
         function extractFilename() {
             const choice = getSourceChoice();
 
@@ -222,7 +299,9 @@ app.registerExtension({
                 for (const src of order) {
                     if (!src) continue;
                     const fn = findFilenameFromChain(src);
-                    if (fn) return { filename: fn, mode: "trigger" };
+                    if (fn && matchesChoice(fn, choice)) {
+                        return { filename: fn, mode: "trigger" };
+                    }
                 }
 
                 // Fallback: scan every other connected input on the node.
@@ -235,7 +314,9 @@ app.registerExtension({
                     const src = app.graph.getNodeById(linkInfo.origin_id);
                     if (!src) continue;
                     const fn = findFilenameFromChain(src);
-                    if (fn) return { filename: fn, mode: "input" };
+                    if (fn && matchesChoice(fn, choice)) {
+                        return { filename: fn, mode: "input" };
+                    }
                 }
             }
 
@@ -247,11 +328,18 @@ app.registerExtension({
                 const fn = getFilenameFromNode(n);
                 if (!fn) continue;
                 const blob = ((n.comfyClass || "") + " " + (n.title || "")).toLowerCase();
-                const isVideo = /video|vhs/.test(blob);
-                const isImage = /image/.test(blob) && !isVideo;
+                const isVideo = /video|vhs/.test(blob) || classifyFilename(fn) === "video";
+                const isImage = (/image/.test(blob) || classifyFilename(fn) === "image") && !isVideo;
                 candidates.push({ node: n, filename: fn, isVideo, isImage });
             }
-            if (candidates.length === 0) return null;
+            // BUG-FIX (Apr 2026): when explicit choice is set, drop
+            // mismatched candidates entirely so we don't return the
+            // wrong-type filename just because nothing of the right
+            // type happens to be in the graph yet.
+            let pool = candidates;
+            if (choice === "video") pool = candidates.filter(c => c.isVideo);
+            else if (choice === "image") pool = candidates.filter(c => c.isImage);
+            if (pool.length === 0) return null;
 
             const score = (c) => {
                 if (choice === "video") return c.isVideo ? 2 : (c.isImage ? 0 : 1);
@@ -264,7 +352,17 @@ app.registerExtension({
                 if (s !== 0) return s;
                 return (b.node.id || 0) - (a.node.id || 0);
             });
-            return { filename: candidates[0].filename, mode: "global" };
+            candidates.sort((a, b) => {
+                const s = score(b) - score(a);
+                if (s !== 0) return s;
+                return (b.node.id || 0) - (a.node.id || 0);
+            });
+            pool.sort((a, b) => {
+                const s = score(b) - score(a);
+                if (s !== 0) return s;
+                return (b.node.id || 0) - (a.node.id || 0);
+            });
+            return { filename: pool[0].filename, mode: "global" };
         }
 
         // ── Status display widget (read-only label on the node) ──────
@@ -314,17 +412,28 @@ app.registerExtension({
             const result = extractFilename();
             const sfWidget = node.widgets?.find(w => w.name === "source_filename");
             if (result && result.filename) {
+                // Widget keeps the FULL filename (with ext) so Python
+                // can preserve the extension on output_filename.
                 if (sfWidget && sfWidget.value !== result.filename) {
                     sfWidget.value = result.filename;
                 }
+                // Status display shows the FORMATTED preview that
+                // matches what Python will write to disk.
+                const fmt      = getNameFormat();
+                const preview  = formatSourceName(result.filename, fmt);
                 const tag = result.mode === "global" ? "\uD83C\uDF10"  // globe for global scan
                           : result.mode === "input"  ? "\uD83D\uDD0C"  // plug for non-trigger input
                                                      : "\uD83D\uDCC4"; // page for trigger
-                setStatus(`${tag} ${result.filename}`);
+                setStatus(`${tag} ${preview}`);
                 app.graph.setDirtyCanvas(true);
             } else {
                 const manual = sfWidget?.value && sfWidget.value.trim();
-                setStatus(manual ? `\uD83D\uDCDD ${manual} (manual)` : "\uD83D\uDCC4 (no source connected)");
+                if (manual) {
+                    const fmt = getNameFormat();
+                    setStatus(`\uD83D\uDCDD ${formatSourceName(manual, fmt)} (manual)`);
+                } else {
+                    setStatus("\uD83D\uDCC4 (no source connected)");
+                }
             }
         }
 
@@ -343,6 +452,16 @@ app.registerExtension({
             choiceWidget.callback = function (v) {
                 origCb?.apply(this, arguments);
                 setTimeout(syncSourceFilename, 50);
+            };
+        }
+
+        // Re-sync when name_format widget changes (live preview)
+        const fmtWidget = node.widgets?.find(w => w.name === "name_format");
+        if (fmtWidget) {
+            const origCb = fmtWidget.callback;
+            fmtWidget.callback = function (v) {
+                origCb?.apply(this, arguments);
+                setTimeout(syncSourceFilename, 0);
             };
         }
 

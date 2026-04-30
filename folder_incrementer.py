@@ -22,7 +22,49 @@ PATH_STYLE_CHOICES = ["auto", "windows", "linux", "macos"]
 # Source-choice widget options.  Drives the JS companion's graph
 # traversal.  Python only consumes `source_filename` (already filled
 # by JS), so this widget is effectively a routing hint for the frontend.
-SOURCE_CHOICE_CHOICES = ["auto", "image", "video"]
+# MANUAL bug-fix (Apr 2026): added 'custom' so users can hand-type a
+# name in the new ``custom_name`` widget instead of being forced to
+# wire up a loader trigger.
+SOURCE_CHOICE_CHOICES = ["auto", "image", "video", "custom"]
+
+# Name-format choices applied to the derived source filename.
+#   basename       — strip extension only           ("clip_2160_25fps")
+#   strip_tags     — strip ext + trailing res/fps    ("clip")
+#   first_segment  — keep only first chunk before    ("clip")
+#                    a `.` or `_`
+# The JS companion mirrors this so the on-node status preview matches
+# what Python writes to disk.
+NAME_FORMAT_CHOICES = ["basename", "strip_tags", "first_segment"]
+
+_TRAILING_TAG_RE = re.compile(
+    r"[._\-](\d{3,4}p?|\d{2,3}fps|[248]k|uhd|hd|sd|sdr|hdr|raw|proxy|final|wip)$",
+    re.IGNORECASE,
+)
+
+
+def _format_source_name(name_no_ext: str, name_format: str) -> str:
+    """Apply the user-selected name_format to a basename (no extension).
+
+    Returns the transformed string, or *name_no_ext* unchanged on any
+    edge case (empty input, unrecognized format, transformation produced
+    empty result).
+    """
+    if not name_no_ext:
+        return name_no_ext
+    if name_format == "first_segment":
+        parts = re.split(r"[._]", name_no_ext, maxsplit=1)
+        return parts[0] if parts and parts[0] else name_no_ext
+    if name_format == "strip_tags":
+        cleaned = name_no_ext
+        # Strip up to 4 trailing tag segments (e.g. `_2160_25fps_proxy`).
+        for _ in range(4):
+            new = _TRAILING_TAG_RE.sub("", cleaned)
+            if new == cleaned:
+                break
+            cleaned = new
+        return cleaned or name_no_ext
+    # "basename" (default) — nothing to do, *name_no_ext* is already ext-less.
+    return name_no_ext
 
 
 def _get_path_sep(style: str) -> str:
@@ -171,10 +213,20 @@ class FolderIncrementer:
                 }),
                 "source_choice": (SOURCE_CHOICE_CHOICES, {
                     "default": "auto",
-                    "tooltip": "Which trigger to read the filename from. "
+                    "tooltip": "Where the source name comes from. "
                                "'image' → trigger_image, 'video' → trigger_video, "
                                "'auto' → prefer video if connected, else image, "
-                               "else legacy `trigger`.",
+                               "else legacy `trigger`. "
+                               "'custom' → use the ``custom_name`` widget verbatim "
+                               "and ignore all triggers.",
+                }),
+                "name_format": (NAME_FORMAT_CHOICES, {
+                    "default": "basename",
+                    "tooltip": "How to format the detected filename for folder + prefix:\n"
+                               "  basename      — strip extension only (e.g. clip_2160_25fps)\n"
+                               "  strip_tags    — also strip trailing res/fps tags (clip)\n"
+                               "  first_segment — keep only the first chunk before . or _ (clip)\n"
+                               "The original file extension is preserved on output_filename.",
                 }),
             },
             "optional": {
@@ -189,6 +241,11 @@ class FolderIncrementer:
                 "source_filename": ("STRING", {"default": "",
                     "tooltip": "Auto-filled by JS from the connected node. "
                                "Drives folder name + output filename."}),
+                "custom_name": ("STRING", {"default": "",
+                    "tooltip": "Manual source name. Only used when source_choice='custom'. "
+                               "May include an extension (e.g. 'my_shot.mp4'); if no "
+                               "extension is given, output_filename will have none either. "
+                               "Sanitized for cross-platform safety."}),
                 "base_path": ("STRING", {"default": "",
                     "tooltip": "Override base output directory.  Leave empty → ComfyUI output dir."}),
                 "folder_name_override": ("STRING", {"default": "",
@@ -216,21 +273,37 @@ class FolderIncrementer:
 
     def increment(self, prefix="v", padding=3, label="default",
                   date_format="MM-DD-YYYY", path_style="auto",
-                  source_choice="auto",
+                  source_choice="auto", name_format="basename",
                   trigger=None, trigger_image=None, trigger_video=None,
-                  source_filename="", base_path="",
+                  source_filename="", custom_name="", base_path="",
                   folder_name_override="", reserve_version=False):
 
         sep = _get_path_sep(path_style)
         detected_os = _get_current_os()
+
+        # MANUAL bug-fix (Apr 2026): when source_choice='custom', the
+        # user-provided custom_name takes precedence over any auto-
+        # detected source_filename. We funnel it through the same
+        # downstream pipeline as a real filename so name_format,
+        # extension preservation, and folder derivation all behave
+        # identically.
+        if str(source_choice).lower() == "custom":
+            cn = (custom_name or "").strip()
+            if cn:
+                source_filename = cn
+            else:
+                # Empty custom_name -> behave like 'no source connected'
+                # so we fall through to the label-based folder.
+                source_filename = ""
 
         # ── 1. Derive names from source file ──────────────────────────
         if source_filename and source_filename.strip() and not _looks_like_input_file(source_filename.strip()):
             # Normalize Windows backslashes when running on POSIX (and vice-versa).
             raw = source_filename.strip().replace("\\", "/")
             basename = Path(raw).name
-            name_no_ext = Path(basename).stem       # "SC_30_SHT50"
+            raw_stem = Path(basename).stem          # "clip_2160_25fps"
             ext = Path(basename).suffix             # ".mp4"
+            name_no_ext = _format_source_name(raw_stem, name_format)
             derived_folder = name_no_ext
         else:
             name_no_ext = ""

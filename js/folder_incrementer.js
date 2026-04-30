@@ -203,7 +203,16 @@ app.registerExtension({
         function getSourceChoice() {
             const w = node.widgets?.find(w => w.name === "source_choice");
             const v = (w?.value || "auto").toString().toLowerCase();
-            return ["auto", "image", "video"].includes(v) ? v : "auto";
+            // MANUAL bug-fix (Apr 2026): added 'custom' so users can
+            // hand-type a name in the new custom_name widget instead
+            // of being forced to wire up a loader trigger.
+            return ["auto", "image", "video", "custom"].includes(v) ? v : "auto";
+        }
+
+        function getCustomName() {
+            const w = node.widgets?.find(w => w.name === "custom_name");
+            const v = (w?.value || "").toString().trim();
+            return v;
         }
 
         // ── Name format (mirrors Python `_format_source_name`) ───────
@@ -285,6 +294,15 @@ app.registerExtension({
 
         function extractFilename() {
             const choice = getSourceChoice();
+
+            // MANUAL bug-fix (Apr 2026): 'custom' short-circuits all
+            // graph traversal. Whatever the user typed in custom_name
+            // is the source name (verbatim, no auto-detection).
+            if (choice === "custom") {
+                const cn = getCustomName();
+                if (cn) return { filename: cn, mode: "custom" };
+                return null;
+            }
 
             if (node.inputs) {
                 const imgSrc    = getSourceNodeFromInput("trigger_image");
@@ -423,6 +441,7 @@ app.registerExtension({
                 const preview  = formatSourceName(result.filename, fmt);
                 const tag = result.mode === "global" ? "\uD83C\uDF10"  // globe for global scan
                           : result.mode === "input"  ? "\uD83D\uDD0C"  // plug for non-trigger input
+                          : result.mode === "custom" ? "\u270D\uFE0F"  // hand-writing for custom
                                                      : "\uD83D\uDCC4"; // page for trigger
                 setStatus(`${tag} ${preview}`);
                 app.graph.setDirtyCanvas(true);
@@ -460,6 +479,17 @@ app.registerExtension({
         if (fmtWidget) {
             const origCb = fmtWidget.callback;
             fmtWidget.callback = function (v) {
+                origCb?.apply(this, arguments);
+                setTimeout(syncSourceFilename, 0);
+            };
+        }
+
+        // Re-sync when custom_name widget changes (so the status preview
+        // updates live in 'custom' mode).
+        const customWidget = node.widgets?.find(w => w.name === "custom_name");
+        if (customWidget) {
+            const origCb = customWidget.callback;
+            customWidget.callback = function (v) {
                 origCb?.apply(this, arguments);
                 setTimeout(syncSourceFilename, 0);
             };

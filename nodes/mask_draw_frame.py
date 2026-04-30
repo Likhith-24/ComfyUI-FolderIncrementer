@@ -1,5 +1,5 @@
 """
-MaskDrawFrame – Draw shapes onto a mask for a specific frame in a sequence.
+MaskDrawFrame â€“ Draw shapes onto a mask for a specific frame in a sequence.
 Supports: circle, rectangle, ellipse, polygon, line, triangle, star, diamond,
 cross, rounded_rectangle, heart, arrow.  All shapes support rotation.
 """
@@ -7,7 +7,10 @@ cross, rounded_rectangle, heart, arrow.  All shapes support rotation.
 import torch
 import numpy as np
 import json
+import logging
 import math
+
+log = logging.getLogger("MaskEditControl.draw")
 
 try:
     import cv2  # type: ignore
@@ -15,6 +18,65 @@ try:
 except ImportError:  # pragma: no cover - cv2 is in requirements but allow fallback
     cv2 = None  # type: ignore
     HAS_CV2 = False
+    log.warning(
+        "[MaskDrawFrame] cv2 not available -- falling back to slower torch/numpy "
+        "polygon rasterizer. SDF quality and speed will be reduced. "
+        "`pip install opencv-python-headless` to restore full quality."
+    )
+
+
+# Schema definition for shape_params_json validation (MANUAL bug-fix Apr 2026):
+# Maps each shape -> set of REQUIRED keys. Optional keys are allowed but not
+# required. Used by ``_validate_shape_params`` to surface helpful errors
+# instead of silently substituting an empty dict.
+_SHAPE_REQUIRED_KEYS = {
+    "circle":            {"cx", "cy", "radius"},
+    "rectangle":         {"x", "y", "w", "h"},
+    "ellipse":           {"cx", "cy", "rx", "ry"},
+    "polygon":           {"points"},
+    "line":              {"x1", "y1", "x2", "y2"},
+    "triangle":          set(),       # accepts {cx,cy,size} OR {points}
+    "star":              {"cx", "cy"}, # outer_r/inner_r/num_points have defaults
+    "diamond":           {"cx", "cy", "w", "h"},
+    "cross":             {"cx", "cy"},
+    "rounded_rectangle": {"x", "y", "w", "h"},
+    "heart":             {"cx", "cy"},
+    "arrow":             {"cx", "cy"},
+}
+
+
+def _validate_shape_params(shape: str, params, *, strict: bool = False) -> dict:
+    """Coerce + validate a shape_params payload.
+
+    Returns a *dict* (params).  When ``strict=True`` and the payload is
+    missing required keys for ``shape``, raises ``ValueError`` with a
+    descriptive message.  When ``strict=False`` (default for back-compat)
+    only logs a warning; the draw routine then uses the per-shape default
+    fallback values, which preserves v1.x behaviour for legacy workflows.
+    """
+    if isinstance(params, list):
+        # Caller will normalise list -> dict; nothing to validate at this layer.
+        return params  # type: ignore[return-value]
+    if not isinstance(params, dict):
+        if strict:
+            raise ValueError(
+                f"MaskDrawFrame: shape_params_json must be a JSON object or list, "
+                f"got {type(params).__name__}"
+            )
+        log.warning("[MaskDrawFrame] shape_params_json is %s; using defaults.",
+                    type(params).__name__)
+        return {}
+
+    required = _SHAPE_REQUIRED_KEYS.get(shape, set())
+    missing = required - params.keys()
+    if missing:
+        msg = (f"MaskDrawFrame: shape={shape!r} missing required key(s) "
+               f"{sorted(missing)} in shape_params_json. "
+               f"Got keys: {sorted(params.keys())}.  Required: {sorted(required)}.")
+        if strict:
+            raise ValueError(msg)
+        log.warning("[MaskDrawFrame] %s -- using defaults for missing keys.", msg)
+    return params
 
 
 class MaskDrawFrame:
@@ -73,7 +135,7 @@ class MaskDrawFrame:
     CATEGORY = "MaskEditControl/Draw"
     DESCRIPTION = "Draw precise geometric shapes onto a mask with feathering, rotation, and blend operations."
 
-    # ── Rotation helper ───────────────────────────────────────────────
+    # â”€â”€ Rotation helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     @staticmethod
     def _rotate_grid(xx: torch.Tensor, yy: torch.Tensor,
                      cx: float, cy: float, angle_deg: float):
@@ -89,7 +151,7 @@ class MaskDrawFrame:
         ry = -dx * sin_a + dy * cos_a
         return rx + cx, ry + cy
 
-    # ── Polygon-to-SDF helper (for feathered polygon shapes) ─────────
+    # â”€â”€ Polygon-to-SDF helper (for feathered polygon shapes) â”€â”€â”€â”€â”€â”€â”€â”€â”€
     @staticmethod
     def _polygon_sdf(pts_list: list, xx: torch.Tensor, yy: torch.Tensor) -> torch.Tensor:
         """Signed distance field for a convex/concave polygon.
@@ -97,9 +159,9 @@ class MaskDrawFrame:
 
         Implementation note (MANUAL-5, v1.7.1+):
         Uses ``cv2.distanceTransform`` for an O(H*W) vectorized SDF instead of
-        the previous O(H*W*N) numpy edge-loop. At 4096² with N=8 vertices the
-        old path allocated ~5 GB of float64 temporaries and timed out; this
-        path stays under ~250 MB and finishes in <200 ms.
+        the previous O(H*W*N) numpy edge-loop. At 4096Â² with N=8 vertices the
+        old path allocated ~5â€¯GB of float64 temporaries and timed out; this
+        path stays under ~250â€¯MB and finishes in <200â€¯ms.
         """
         n = len(pts_list)
         if n < 3:
@@ -157,7 +219,7 @@ class MaskDrawFrame:
         sign = np.where(winding != 0, -1.0, 1.0).astype(np.float32)
         return torch.from_numpy(sign * np.sqrt(min_dist, dtype=np.float32))
 
-    # ── Generate regular polygon vertices ─────────────────────────────
+    # â”€â”€ Generate regular polygon vertices â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     @staticmethod
     def _regular_polygon_pts(cx: float, cy: float, r: float, n: int,
                              start_angle: float = -math.pi / 2) -> list:
@@ -193,10 +255,34 @@ class MaskDrawFrame:
 
         try:
             params = json.loads(shape_params_json) if isinstance(shape_params_json, str) else shape_params_json
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            log.warning(
+                "[MaskDrawFrame] shape_params_json is not valid JSON (%s); "
+                "using empty params and per-shape defaults.", exc,
+            )
             params = {}
 
-        # ── Normalise params: list → dict based on shape ──────────────
+        # MANUAL bug-fix (Apr 2026): validate schema and warn on missing keys.
+        # Soft validation -- preserves back-compat with workflows that relied
+        # on per-shape default fallbacks. Strict mode is reserved for callers
+        # that pass strict_validation through; not exposed via INPUT_TYPES yet.
+        params = _validate_shape_params(shape, params, strict=False)
+
+        # â”€â”€ Normalise params: list â†’ dict based on shape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # MANUAL bug-fix (Apr 2026): if params is a list-of-dicts (keyframe
+        # array as accepted by MaskDrawFrameBatch), pick the first dict as
+        # the single-frame fallback. Without this guard, the numeric-array
+        # branches below crash with "float() argument must be a string or a
+        # real number, not 'dict'" when a keyframe array is wired to the
+        # single-frame node by mistake.
+        if isinstance(params, list) and len(params) > 0 and isinstance(params[0], dict):
+            log.warning(
+                "[MaskDrawFrame] shape_params_json is a list of %d dict(s); "
+                "single-frame node uses element [0] only. Use "
+                "MaskDrawFrameBatch for per-frame keyframes.",
+                len(params),
+            )
+            params = params[0]
         if isinstance(params, list):
             if shape == "circle" and len(params) >= 3:
                 params = {"cx": params[0], "cy": params[1], "radius": params[2]}
@@ -539,7 +625,7 @@ class MaskDrawFrame:
         """Polygon fill (no cv2 dependency).
 
         MANUAL-5 (v1.7.1+): replaces the old per-row Python scanline loop
-        (which did 4096 Python iterations at 4096² and timed out) with a
+        (which did 4096 Python iterations at 4096Â² and timed out) with a
         vectorized fully-numpy scanline rasterizer. cv2 path is preferred
         when available (see callers).
         """
@@ -583,17 +669,17 @@ class MaskDrawFrame:
         return torch.from_numpy(canvas)
 
 
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  Helper: Parse coords_json for per-frame batch tracking
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _parse_coords_for_batch(coords_json: str, batch_size: int) -> list:
     """Parse coords JSON and expand to per-frame list.
 
     Accepts:
-      - Single dict: {"cx":256,"cy":256,...} → same coords for all frames
-      - List of dicts: [{"cx":256,...}, {"cx":300,...}] → one per frame (cycles)
-      - SAM-style list: [{"x":256,"y":256},...] → extracts first as center
+      - Single dict: {"cx":256,"cy":256,...} â†’ same coords for all frames
+      - List of dicts: [{"cx":256,...}, {"cx":300,...}] â†’ one per frame (cycles)
+      - SAM-style list: [{"x":256,"y":256},...] â†’ extracts first as center
 
     Returns: list of dicts, length = batch_size.
     """
@@ -615,13 +701,13 @@ def _parse_coords_for_batch(coords_json: str, batch_size: int) -> list:
     return [{}] * batch_size
 
 
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  Shape Draw Wrapper Nodes
 #  Simplified interfaces delegating to MaskDrawFrame.draw()
-# ══════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class DrawShapeMEC:
-    """Unified shape drawing node — one dropdown for all 12 shapes.
+    """Unified shape drawing node â€” one dropdown for all 12 shapes.
     Parameters for all shapes visible; irrelevant ones are ignored per shape.
     Accepts coords_json from Points Mask Editor for per-frame positioning."""
 
@@ -641,61 +727,61 @@ class DrawShapeMEC:
                     "tooltip": "Canvas height in pixels."}),
                 "shape": (cls.SHAPES, {"default": "circle",
                     "tooltip": "Shape type to draw. Parameters below adapt per shape."}),
-                # ── Position (used by most shapes) ──
+                # â”€â”€ Position (used by most shapes) â”€â”€
                 "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Center X — used by: circle, ellipse, triangle, star, diamond, cross, heart, arrow."}),
+                    "tooltip": "Center X â€” used by: circle, ellipse, triangle, star, diamond, cross, heart, arrow."}),
                 "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Center Y — used by: circle, ellipse, triangle, star, diamond, cross, heart, arrow."}),
-                # ── Size params ──
+                    "tooltip": "Center Y â€” used by: circle, ellipse, triangle, star, diamond, cross, heart, arrow."}),
+                # â”€â”€ Size params â”€â”€
                 "radius": ("FLOAT", {"default": 50.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Radius — circle. Also used as 'size' for triangle/heart."}),
+                    "tooltip": "Radius â€” circle. Also used as 'size' for triangle/heart."}),
                 "size_w": ("FLOAT", {"default": 200.0, "min": 0.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Width — rectangle, rounded_rectangle, diamond, arrow(width)."}),
+                    "tooltip": "Width â€” rectangle, rounded_rectangle, diamond, arrow(width)."}),
                 "size_h": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Height — rectangle, rounded_rectangle, diamond."}),
+                    "tooltip": "Height â€” rectangle, rounded_rectangle, diamond."}),
                 "rx": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Radius X — ellipse."}),
+                    "tooltip": "Radius X â€” ellipse."}),
                 "ry": ("FLOAT", {"default": 50.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Radius Y — ellipse."}),
+                    "tooltip": "Radius Y â€” ellipse."}),
                 "top_left_x": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Top-left X — rectangle, rounded_rectangle. Also line start X."}),
+                    "tooltip": "Top-left X â€” rectangle, rounded_rectangle. Also line start X."}),
                 "top_left_y": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Top-left Y — rectangle, rounded_rectangle. Also line start Y."}),
-                # ── Line params ──
+                    "tooltip": "Top-left Y â€” rectangle, rounded_rectangle. Also line start Y."}),
+                # â”€â”€ Line params â”€â”€
                 "x2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
                     "tooltip": "Line end X."}),
                 "y2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5,
                     "tooltip": "Line end Y."}),
                 "thickness": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 500.0, "step": 0.5,
-                    "tooltip": "Thickness — line, cross."}),
-                # ── Star params ──
+                    "tooltip": "Thickness â€” line, cross."}),
+                # â”€â”€ Star params â”€â”€
                 "outer_r": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Outer radius — star."}),
+                    "tooltip": "Outer radius â€” star."}),
                 "inner_r": ("FLOAT", {"default": 40.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Inner radius — star."}),
+                    "tooltip": "Inner radius â€” star."}),
                 "num_points": ("INT", {"default": 5, "min": 3, "max": 50,
-                    "tooltip": "Number of points/sides — star, polygon."}),
-                # ── Rounded rect / cross ──
+                    "tooltip": "Number of points/sides â€” star, polygon."}),
+                # â”€â”€ Rounded rect / cross â”€â”€
                 "corner_radius": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 4096.0, "step": 0.5,
-                    "tooltip": "Corner radius — rounded_rectangle."}),
+                    "tooltip": "Corner radius â€” rounded_rectangle."}),
                 "cross_size": ("FLOAT", {"default": 100.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Arm length — cross."}),
-                # ── Arrow params ──
+                    "tooltip": "Arm length â€” cross."}),
+                # â”€â”€ Arrow params â”€â”€
                 "arrow_length": ("FLOAT", {"default": 200.0, "min": 0.0, "max": 16384.0, "step": 0.5,
-                    "tooltip": "Total length — arrow."}),
+                    "tooltip": "Total length â€” arrow."}),
                 "head_length": ("FLOAT", {"default": 60.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Head length — arrow."}),
+                    "tooltip": "Head length â€” arrow."}),
                 "head_width": ("FLOAT", {"default": 80.0, "min": 0.0, "max": 8192.0, "step": 0.5,
-                    "tooltip": "Head width — arrow."}),
-                # ── Polygon points (JSON) ──
+                    "tooltip": "Head width â€” arrow."}),
+                # â”€â”€ Polygon points (JSON) â”€â”€
                 "points_json": ("STRING", {
                     "default": '[[100,100],[400,100],[400,400],[100,400]]',
                     "multiline": True,
                     "tooltip": "Vertex list for polygon: [[x1,y1],[x2,y2],...]. Only used when shape=polygon.",
                 }),
-                # ── Common ──
+                # â”€â”€ Common â”€â”€
                 "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Fill intensity (0.0–1.0)."}),
+                    "tooltip": "Fill intensity (0.0â€“1.0)."}),
                 "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
                     "tooltip": "Soft edge feathering in pixels."}),
                 "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5,
@@ -719,7 +805,7 @@ class DrawShapeMEC:
     CATEGORY = "MaskEditControl/Draw"
     DESCRIPTION = (
         "Unified shape drawing: pick any of 12 shapes from the dropdown.\n"
-        "Parameters adapt per shape — unused ones are simply ignored.\n"
+        "Parameters adapt per shape â€” unused ones are simply ignored.\n"
         "Shapes: circle, rectangle, ellipse, polygon, line, triangle, star,\n"
         "diamond, cross, rounded_rectangle, heart, arrow."
     )
@@ -842,178 +928,8 @@ class DrawShapeMEC:
         return (torch.cat(results, dim=0),)
 
 
-# ── Keep old wrapper classes for backward compatibility (deprecated) ──
-# Users with existing workflows referencing these will not break.
 
-class DrawCircleMEC(DrawShapeMEC):
-    """[Deprecated] Use Draw Shape (MEC) instead. Draws a circle."""
-    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=circle."
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "radius": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 8192.0, "step": 0.5}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": ""}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-    CATEGORY = "MaskEditControl/Draw"
-    FUNCTION = "draw_circle"
-    def draw_circle(self, width, height, cx, cy, radius, value, feather, batch_size,
-                    coords_json="", existing_mask=None, reference_image=None):
-        return self.draw(width, height, "circle", cx, cy, radius,
-                         200, 100, 100, 50, 100, 100, 400, 400, 5,
-                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
-                         value, feather, 0.0, "set", batch_size,
-                         coords_json, existing_mask, reference_image)
-
-
-class DrawRectangleMEC(DrawShapeMEC):
-    """[Deprecated] Use Draw Shape (MEC) instead. Draws a rectangle."""
-    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=rectangle."
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "x": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "y": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "w": ("FLOAT", {"default": 200.0, "min": 1.0, "max": 16384.0, "step": 0.5}),
-                "h": ("FLOAT", {"default": 100.0, "min": 1.0, "max": 16384.0, "step": 0.5}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": ""}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-    CATEGORY = "MaskEditControl/Draw"
-    FUNCTION = "draw_rect"
-    def draw_rect(self, width, height, x, y, w, h, value, feather, rotation, batch_size,
-                  coords_json="", existing_mask=None, reference_image=None):
-        return self.draw(width, height, "rectangle", 256, 256, 50,
-                         w, h, 100, 50, x, y, 400, 400, 5,
-                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
-                         value, feather, rotation, "set", batch_size,
-                         coords_json, existing_mask, reference_image)
-
-
-class DrawEllipseMEC(DrawShapeMEC):
-    """[Deprecated] Use Draw Shape (MEC) instead. Draws an ellipse."""
-    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=ellipse."
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "cx": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "cy": ("FLOAT", {"default": 256.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "rx": ("FLOAT", {"default": 100.0, "min": 1.0, "max": 8192.0, "step": 0.5}),
-                "ry": ("FLOAT", {"default": 50.0, "min": 1.0, "max": 8192.0, "step": 0.5}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": ""}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-    CATEGORY = "MaskEditControl/Draw"
-    FUNCTION = "draw_ellipse"
-    def draw_ellipse(self, width, height, cx, cy, rx, ry, value, feather, rotation, batch_size,
-                     coords_json="", existing_mask=None, reference_image=None):
-        return self.draw(width, height, "ellipse", cx, cy, 50,
-                         200, 100, rx, ry, 100, 100, 400, 400, 5,
-                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
-                         value, feather, rotation, "set", batch_size,
-                         coords_json, existing_mask, reference_image)
-
-
-class DrawPolygonMEC(DrawShapeMEC):
-    """[Deprecated] Use Draw Shape (MEC) instead. Draws a polygon."""
-    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=polygon."
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "points_json": ("STRING", {
-                    "default": '[[100,100],[400,100],[400,400],[100,400]]',
-                    "multiline": True,
-                }),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": ""}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-    CATEGORY = "MaskEditControl/Draw"
-    FUNCTION = "draw_polygon"
-    def draw_polygon(self, width, height, points_json, value, feather, rotation, batch_size,
-                     coords_json="", existing_mask=None, reference_image=None):
-        return self.draw(width, height, "polygon", 256, 256, 50,
-                         200, 100, 100, 50, 100, 100, 400, 400, 5,
-                         100, 40, 5, 20, 100, 200, 60, 80, points_json,
-                         value, feather, rotation, "set", batch_size,
-                         coords_json, existing_mask, reference_image)
-
-
-class DrawLineMEC(DrawShapeMEC):
-    """[Deprecated] Use Draw Shape (MEC) instead. Draws a line."""
-    DESCRIPTION = "Deprecated — use Draw Shape (MEC) with shape=line."
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "width": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "height": ("INT", {"default": 512, "min": 1, "max": 16384}),
-                "x1": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "y1": ("FLOAT", {"default": 100.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "x2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "y2": ("FLOAT", {"default": 400.0, "min": -16384.0, "max": 16384.0, "step": 0.5}),
-                "thickness": ("FLOAT", {"default": 5.0, "min": 1.0, "max": 500.0, "step": 0.5}),
-                "value": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "feather": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5}),
-                "rotation": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 0.5}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 256}),
-            },
-            "optional": {
-                "coords_json": ("STRING", {"default": ""}),
-                "existing_mask": ("MASK",),
-                "reference_image": ("IMAGE",),
-            },
-        }
-    CATEGORY = "MaskEditControl/Draw"
-    FUNCTION = "draw_line"
-    def draw_line(self, width, height, x1, y1, x2, y2, thickness, value, feather, rotation,
-                  batch_size, coords_json="", existing_mask=None, reference_image=None):
-        return self.draw(width, height, "line", 256, 256, 50,
-                         200, 100, 100, 50, x1, y1, x2, y2, thickness,
-                         100, 40, 5, 20, 100, 200, 60, 80, "[]",
-                         value, feather, rotation, "set", batch_size,
-                         coords_json, existing_mask, reference_image)
+# Apr 2026 cleanup: DrawCircleMEC / DrawRectangleMEC / DrawEllipseMEC /
+# DrawPolygonMEC / DrawLineMEC removed. Use DrawShapeMEC with the
+# corresponding `shape` value instead. Snapshot retained at
+# ``_deprecated/mask_draw_frame.snapshot.py``.

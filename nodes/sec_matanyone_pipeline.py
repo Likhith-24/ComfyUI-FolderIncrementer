@@ -186,8 +186,13 @@ class SeCMatAnyonePipelineMEC:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # ── Stage 1: Coarse Segmentation ──────────────────────────────
-        from .unified_segmentation_node import UnifiedSegmentationNode
-        seg_node = UnifiedSegmentationNode()
+        # MANUAL bug-fix (Apr 2026): the legacy import targeted
+        # `unified_segmentation_node.UnifiedSegmentationNode` which lives in
+        # `_deprecated/`.  The active replacement is
+        # `unified_segmentation.UnifiedSegmentation` whose `segment()` exposes
+        # a smaller kwarg surface — call it with only the supported keys.
+        from .unified_segmentation import UnifiedSegmentation
+        seg_node = UnifiedSegmentation()
         coarse_masks, score, seg_info = seg_node.segment(
             image=image,
             model_name=segmentation_model,
@@ -196,16 +201,9 @@ class SeCMatAnyonePipelineMEC:
             multimask=True,
             mask_index=0,
             precision=precision,
-            attention_mode="auto",
-            positive_coords=positive_coords,
-            negative_coords=negative_coords,
             bbox=bbox,
             text_prompt=text_prompt,
-            grounding_model="none",
             existing_mask=None,
-            keep_model_loaded=keep_model_loaded,
-            tracking_direction="forward" if is_video else "forward",
-            annotation_frame_idx=0,
         )
 
         # ── Stage 2: Alpha Matting ────────────────────────────────────

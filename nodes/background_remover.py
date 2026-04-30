@@ -97,7 +97,14 @@ class BackgroundRemoverMEC:
         keep_model_loaded: bool = True,
     ):
         B, H, W, C = image.shape
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # MANUAL bug-fix (Apr 2026): full device autodetect (cuda > mps > cpu)
+        # so Apple-Silicon and AMD-ROCm users get GPU acceleration too.
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
 
         loaded = get_or_load_model(model_name, precision="fp32", device=device)
         model = loaded["model"]
@@ -113,6 +120,7 @@ class BackgroundRemoverMEC:
             if processor is not None:
                 inputs = processor(images=pil_img, return_tensors="pt")
                 inputs = {k: v.to(dev) for k, v in inputs.items()}
+                input_t = None
             else:
                 from torchvision import transforms
                 transform = transforms.Compose([
@@ -121,20 +129,42 @@ class BackgroundRemoverMEC:
                     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
                 ])
                 input_t = transform(pil_img).unsqueeze(0).to(dev)
-                inputs = {"pixel_values": input_t}
+                inputs = None
 
+            # MANUAL bug-fix (Apr 2026): BiRefNet's custom forward(x) does not
+            # accept the keyword `pixel_values`; call positionally when the
+            # processor was unavailable (BiRefNet path).  Also cast input dtype
+            # to match the loaded model parameters (fp16 BiRefNet variant).
             with torch.no_grad():
-                out = model(**inputs)
+                if inputs is not None:
+                    out = model(**inputs)
+                else:
+                    p_dtype = next(model.parameters()).dtype
+                    if input_t.dtype != p_dtype:
+                        input_t = input_t.to(p_dtype)
+                    try:
+                        out = model(input_t)
+                    except TypeError:
+                        out = model(pixel_values=input_t)
 
-            # Extract alpha map from model output
+            # Extract alpha map from model output (MANUAL bug-fix Apr 2026:
+            # use single getattr instead of fragile elif-chain that broke on
+            # diffusers Output dataclasses without .logits but with __getitem__).
             if hasattr(out, "logits"):
                 logits = out.logits
-            elif isinstance(out, (list, tuple)):
-                logits = out[-1] if len(out) > 0 else out[0]
             elif isinstance(out, torch.Tensor):
                 logits = out
+            elif isinstance(out, (list, tuple)) and len(out) > 0:
+                logits = out[-1]
             else:
-                logits = out[0]
+                # last-resort: index access for HF ModelOutput-style mappings
+                try:
+                    logits = out[0]
+                except (KeyError, IndexError, TypeError) as exc:
+                    raise RuntimeError(
+                        f"BackgroundRemoverMEC: cannot extract alpha logits from "
+                        f"model output of type {type(out).__name__}: {exc}"
+                    )
 
             alpha = torch.sigmoid(logits[0, 0]).cpu()
 
